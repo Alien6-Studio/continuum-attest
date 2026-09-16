@@ -46,7 +46,7 @@ blake3 = "1.5"
 ed25519-dalek = { version = "2.0", features = ["rand_core", "pkcs8", "pem"] }
 rand = "0.8"
 hex = "0.4"
-toml = "0.8"
+toml = "1.1"
 tar = "0.4"
 zstd = "0.13"
 
