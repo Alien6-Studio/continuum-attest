@@ -103,7 +103,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # default-features = false drops the remote $ref resolvers, and with them a
 # second copy of reqwest in the dependency graph. The tests only ever compile
 # local schemas.
-jsonschema = { version = "0.17", default-features = false }
+jsonschema = { version = "0.56", default-features = false }
 assert_cmd = "2.0"
 # Test-only: concurrency harnesses (futures::future::join_all) and glob
 # matching. Both used to sit in [dependencies] without the core ever
