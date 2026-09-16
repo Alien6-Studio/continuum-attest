@@ -16,9 +16,37 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
+  # rustfmt and clippy are pinned, deliberately. Both change their output
+  # and gain lints between Rust releases, so a floating toolchain lets an
+  # unrelated release turn an unchanged commit red. Tests still run on
+  # floating stable below, which is where real breakage should surface.
+  # Bump this by hand.
+  lint:
+    name: lint (rust 1.98.1)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # --lib --bins, not --all-targets: the workspace enables
+      # clippy::unwrap_used, which is denied in the library and expected in
+      # test code.
+      - name: Clippy
+        run: cargo clippy --lib --bins --locked -- -D warnings
+
   gates:
     name: gates (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -36,22 +64,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
-        with:
-          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      # --lib --bins, not --all-targets: the workspace enables
-      # clippy::unwrap_used, which is denied in the library and expected in
-      # test code.
-      - name: Clippy
-        run: cargo clippy --lib --bins -- -D warnings
-
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
   # The declared MSRV is the tested MSRV: the toolchain comes from
   # Cargo.toml, so the two cannot drift. Checked against the committed
@@ -81,17 +98,24 @@ jobs:
   dogfood:
     name: attest attests itself
     runs-on: ubuntu-latest
-    needs: gates
+    needs: [lint, gates]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # attest.yaml runs cargo fmt and cargo clippy as pipeline steps, so
+      # this job needs both components. Pinned to the lint gate's toolchain:
+      # the receipt this job signs should describe a build someone else can
+      # reproduce, which a floating toolchain does not give you.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
+          toolchain: "1.98.1"
           components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build attest
-        run: cargo build --release
+        run: cargo build --release --locked
 
       # Pull requests from forks have no access to secrets, so they run the
       # pipeline unsigned. Pushes to main sign with the release key and the

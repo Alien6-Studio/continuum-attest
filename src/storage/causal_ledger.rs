@@ -538,11 +538,7 @@ impl CausalLedger {
             total_chains,
             root_events,
             leaf_events,
-            avg_chain_length: if total_chains > 0 {
-                total_events / total_chains
-            } else {
-                0
-            },
+            avg_chain_length: total_events.checked_div(total_chains).unwrap_or(0),
         }
     }
 

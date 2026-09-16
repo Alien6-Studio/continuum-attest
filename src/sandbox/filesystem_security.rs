@@ -407,7 +407,7 @@ impl FilesystemSecurityManager {
             .collect();
 
         // Sort by priority (highest first)
-        matching_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        matching_rules.sort_by_key(|rule| std::cmp::Reverse(rule.priority));
         matching_rules.first().copied()
     }
 

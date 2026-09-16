@@ -1791,7 +1791,7 @@ async fn handle_causal_events(limit: usize, step_filter: Option<String>) -> Resu
     }
 
     // Most recent first, then truncated: "recent" has to mean recent.
-    events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    events.sort_by_key(|event| std::cmp::Reverse(event.timestamp));
     let total = events.len();
     events.truncate(limit);
 
