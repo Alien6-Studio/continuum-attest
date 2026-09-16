@@ -1,0 +1,44 @@
+version: "0.1"
+name: "attest-ci"
+
+env:
+  RUST_LOG: "info"
+  CARGO_TERM_COLOR: "always"
+
+steps:
+  format-check:
+    run: "cargo fmt --all -- --check"
+    inputs: ["src/", "tests/", "Cargo.toml"]
+    outputs: []
+    attestation:
+      type: "format-check"
+
+  clippy:
+    # --lib --bins (not --all-targets): the workspace enables
+    # clippy::unwrap_used as a warning, which is expected in test code.
+    run: "cargo clippy --lib --bins --locked -- -D warnings"
+    # Cargo.lock is a declared input everywhere cargo resolves dependencies.
+    # Without it a lockfile change leaves the input hash untouched: the cache
+    # would serve a stale result and the receipt would describe a build that
+    # is not the one that ran.
+    inputs: ["src/", "Cargo.toml", "Cargo.lock"]
+    outputs: []
+    attestation:
+      type: "lint"
+
+  test:
+    run: "cargo test --locked"
+    inputs: ["src/", "tests/", "Cargo.toml", "Cargo.lock"]
+    outputs: []
+    needs: ["format-check", "clippy"]
+    attestation:
+      type: "test"
+
+  build-release:
+    run: "cargo build --release --locked"
+    inputs: ["src/", "Cargo.toml", "Cargo.lock"]
+    outputs: ["target/release/attest"]
+    needs: ["test"]
+    attestation:
+      type: "build"
+      reproducible: true

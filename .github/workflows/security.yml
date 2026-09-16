@@ -1,0 +1,46 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # A dependency that was clean yesterday can have an advisory today, so
+    # this runs on a timer as well as on changes.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Split so an advisory and a licence problem are distinguishable
+        # at a glance in the checks list.
+        checks: [advisories, licenses, bans, sources]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
+
+  unsafe:
+    name: unsafe code inventory
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Reported, not gated: the count is a number to watch in review, and a
+      # hard threshold would only push people to work around it. cargo-geiger
+      # also breaks on new compilers regularly, so neither step may fail the
+      # run — an unavailable inventory is not a security finding.
+      - run: cargo install cargo-geiger --locked
+        continue-on-error: true
+      - run: cargo geiger --output-format GitHubMarkdown >> "$GITHUB_STEP_SUMMARY"
+        continue-on-error: true

@@ -1,0 +1,15 @@
+# Default owner for everything.
+*                           @Alien6-Studio/maintainers
+
+# Paths where a mistake is not merely a bug: the signed wire format, the
+# verification path, key handling, and the plugin boundary.
+/src/crypto/                @Alien6-Studio/maintainers
+/src/keys.rs                @Alien6-Studio/maintainers
+/src/verify.rs              @Alien6-Studio/maintainers
+/src/storage/receipt_format.rs @Alien6-Studio/maintainers
+
+# Release and supply-chain configuration.
+/.github/workflows/         @Alien6-Studio/maintainers
+/deny.toml                  @Alien6-Studio/maintainers
+/LICENSE                    @Alien6-Studio/maintainers
+/NOTICE                     @Alien6-Studio/maintainers

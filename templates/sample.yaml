@@ -1,0 +1,62 @@
+# A minimal attested pipeline.
+#
+# Two rules make the difference between a pipeline and an attested one:
+#
+#   1. Declare what each step reads and writes. Declared paths are what
+#      gets hashed, cached and recorded in the receipt. A step that reads
+#      something it did not declare produces a receipt that does not
+#      describe it.
+#   2. Declare the lockfile wherever a step resolves dependencies. Omitting
+#      it means a dependency change leaves the input hash untouched.
+#   3. Do not embed changing values in outputs. A timestamp, a hostname or
+#      a random seed baked into an artifact makes the build irreproducible,
+#      and `attest run --check-reproducibility` will say so.
+
+version: "0.1"
+name: "sample-project"
+
+# A top-level `attestation:` block is accepted but only drives validation
+# warnings — it does not change what runs or what gets signed. Signing is
+# `attest run --sign`, and timestamping is `--timestamp`.
+
+env:
+  BUILD_ENV: "production"
+
+steps:
+  build:
+    run: |
+      mkdir -p build
+      cp -r src/. build/
+    inputs: ["src/"]
+    outputs: ["build/"]
+    attestation:
+      type: "build"
+      reproducible: true
+
+  test:
+    run: |
+      test -d build
+    inputs: ["build/"]
+    outputs: []
+    needs: ["build"]
+    # Test results are not an artifact anyone reproduces; caching a test
+    # run would replay a stale verdict.
+    cache: false
+    attestation:
+      type: "test"
+
+  package:
+    run: |
+      mkdir -p dist
+      # --sort=name and a fixed mtime: without them the archive differs
+      # between two runs even when its contents do not.
+      tar --sort=name --mtime="@${SOURCE_DATE_EPOCH:-0}" \
+          --owner=0 --group=0 --numeric-owner \
+          -czf dist/app.tar.gz build
+    inputs: ["build/"]
+    outputs: ["dist/app.tar.gz"]
+    needs: ["build", "test"]
+    attestation:
+      type: "package"
+      reproducible: true
+      generate_slsa: true

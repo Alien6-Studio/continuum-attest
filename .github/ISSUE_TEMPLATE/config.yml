@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Alien6-Studio/continuum-attest/security/advisories/new
+    about: Never in a public issue. Private reporting, see SECURITY.md.
+  - name: Question or idea
+    url: https://github.com/Alien6-Studio/continuum-attest/discussions
+    about: Use Discussions for anything that is not a defect or a concrete request.
+  - name: Product documentation
+    url: https://attest.continuu.ms/en/docs/
+    about: Installation, configuration, CI integration and the trust model.

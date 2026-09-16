@@ -1,0 +1,40 @@
+{
+  "linux/amd64": {
+    "SPDX": {
+      "SPDXID": "SPDXRef-DOCUMENT",
+      "spdxVersion": "SPDX-2.3",
+      "name": "continuum-gateway",
+      "dataLicense": "CC0-1.0",
+      "creationInfo": {
+        "created": "2026-08-27T09:41:12Z",
+        "creators": ["Tool: buildkit-v0.16.0"]
+      },
+      "packages": [
+        {
+          "SPDXID": "SPDXRef-Package-apk-alpine-baselayout-5b1c9e2a4d3f6e70",
+          "name": "alpine-baselayout",
+          "versionInfo": "3.6.5-r0"
+        }
+      ]
+    }
+  },
+  "linux/arm64": {
+    "SPDX": {
+      "SPDXID": "SPDXRef-DOCUMENT",
+      "spdxVersion": "SPDX-2.3",
+      "name": "continuum-gateway",
+      "dataLicense": "CC0-1.0",
+      "creationInfo": {
+        "created": "2026-08-27T09:43:55Z",
+        "creators": ["Tool: buildkit-v0.16.0"]
+      },
+      "packages": [
+        {
+          "SPDXID": "SPDXRef-Package-apk-alpine-baselayout-7c2d0f3b5a4e6d81",
+          "name": "alpine-baselayout",
+          "versionInfo": "3.6.5-r0"
+        }
+      ]
+    }
+  }
+}

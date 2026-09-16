@@ -1,0 +1,25 @@
+pipeline_hash: 0bdaa42019b9b7575d118a4a1cee288233858e48c86c9d105a47f080c6e7e760
+steps:
+- name: build
+  input_hash: 0a781b06f2a71d7724fdaeb4cfb66751b587f9a382027c2fa28142a465230053
+  output_hash: 6a71278d3e315ca8dbc14f6c38963e06f6261c5ea444a899619cd610aedf8910
+  duration_secs: 42
+  exit_code: 0
+  cache_hit: false
+  stdout: compiled 3 crates
+  stderr: ''
+- name: test
+  input_hash: add88c2f7dc330dd1e058850a73565f894b3ff2cb0a53bc780d829afce6e03b3
+  output_hash: b01f35b8e3a21a39f64d2c2bbe48a8dd06469f6bca46fa0b951fdc83bc654595
+  duration_secs: 17
+  exit_code: 0
+  cache_hit: false
+  stdout: 12 tests passed
+  stderr: ''
+timestamp: 2026-08-27T12:00:59Z
+total_duration_secs: 59
+signature: e34e2377c86157459d40769c435c77b0e2bbac419cb9fca4ff19f68de58f7521fb882a44522b9566e7eca28c59bb3d6b83537a2c9c836e2b057bd7eb450b460d
+signer_public_key: b4e262319c72b473cfb81153cf9e5d8ec619950a131d7d98916951aa05a8387c
+attest_version: 0.1.0
+causal_events: []
+causal_chain_hash: null

@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to the same ref makes the previous run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # rustfmt and clippy are pinned, deliberately. Both change their output
+  # and gain lints between Rust releases, so a floating toolchain lets an
+  # unrelated release turn an unchanged commit red. Tests still run on
+  # floating stable below, which is where real breakage should surface.
+  # Bump this by hand.
+  lint:
+    name: lint (rust 1.98.1)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # --lib --bins, not --all-targets: the workspace enables
+      # clippy::unwrap_used, which is denied in the library and expected in
+      # test code.
+      - name: Clippy
+        run: cargo clippy --lib --bins --locked -- -D warnings
+
+      # clippy above covers --lib --bins only, so nothing would gate rustc
+      # warnings in test code. That gap is not theoretical: a criterion bump
+      # slid 39 deprecations past a green build. Pinned toolchain, so this
+      # cannot fail on a lint that did not exist when the code was written.
+      - name: Warnings in every target
+        run: cargo check --all-targets --locked
+
+  gates:
+    name: gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux and macOS only. The unix-specific paths (0o600 on private
+        # keys, 0o700 on the connection directory) are `#[cfg(unix)]` with
+        # no Windows equivalent, so a Windows build would write key
+        # material without the intended permissions. See issue tracker
+        # before adding windows-latest here.
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Test
+        run: cargo test --locked
+
+  # The declared MSRV is the tested MSRV: the toolchain comes from
+  # Cargo.toml, so the two cannot drift. Checked against the committed
+  # Cargo.lock, which is what `--locked` resolves to.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$v" ]; then echo "no rust-version in Cargo.toml" >&2; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $v"
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - run: cargo check --all-targets --locked
+
+  dogfood:
+    name: attest attests itself
+    runs-on: ubuntu-latest
+    needs: [lint, gates]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # attest.yaml runs cargo fmt and cargo clippy as pipeline steps, so
+      # this job needs both components. Pinned to the lint gate's toolchain:
+      # the receipt this job signs should describe a build someone else can
+      # reproduce, which a floating toolchain does not give you.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build attest
+        run: cargo build --release --locked
+
+      # Pull requests from forks have no access to secrets, so they run the
+      # pipeline unsigned. Pushes to main sign with the release key and the
+      # receipt is verified against the committed trust store.
+      #
+      # No --timestamp on this path: see release.yml. Timestamping matters
+      # for evidence that outlives the run, and a timestamp authority being
+      # unreachable must never be able to fail a pull request.
+      - name: Install signing key
+        id: key
+        if: ${{ github.event_name == 'push' }}
+        env:
+          SIGNING_KEY: ${{ secrets.ATTEST_SIGNING_KEY }}
+          KEY_ID: ${{ vars.ATTEST_KEY_ID }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "ATTEST_SIGNING_KEY is not set on a push to main" >&2
+            exit 1
+          fi
+          mkdir -p .attest/keys
+          printf '%s' "$SIGNING_KEY" | base64 -d > ".attest/keys/$KEY_ID.key"
+          grep -q "BEGIN PRIVATE KEY" ".attest/keys/$KEY_ID.key"
+          chmod 600 ".attest/keys/$KEY_ID.key"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run the attested pipeline
+        run: |
+          if [ "${{ steps.key.outputs.signed }}" = "true" ]; then
+            ./target/release/attest run --verify --sign --key "${{ vars.ATTEST_KEY_ID }}"
+          else
+            ./target/release/attest run --verify
+          fi
+
+      # An unsigned receipt fails the signature check by design, so the
+      # fork path verifies everything except the signature.
+      - name: Verify the receipts independently
+        run: |
+          ./target/release/attest verify .attest/receipts/*.yaml \
+            --recompute \
+            --trust-store .attest/trust \
+            --check-signatures ${{ steps.key.outputs.signed == 'true' }} \
+            --format text
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: receipts
+          path: .attest/receipts/
+          retention-days: 14
