@@ -128,7 +128,7 @@ path = "tests/benchmarks/pipeline_performance.rs"
 harness = false
 
 [dev-dependencies.criterion]
-version = "0.5"
+version = "0.8"
 features = ["html_reports"]
 
 # Note: Security patches applied through dependency version updates
