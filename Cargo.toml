@@ -77,7 +77,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ignore = "0.4"
 
 # Encoding: DSSE envelopes and PEM handling
-base64 = "0.22"
+base64 = "0.23"
 
 # Signature verification for RFC 3161 timestamp tokens. Already in the
 # dependency graph underneath rustls, so this adds no new supply-chain
