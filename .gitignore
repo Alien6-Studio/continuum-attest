@@ -1,0 +1,44 @@
+# Rust
+/target/
+**/*.rs.bk
+# Cargo.lock is committed on purpose: this crate ships a binary, and a
+# locked dependency graph is what makes a build reproducible and what the
+# declared MSRV is tested against.
+
+# Coverage
+*.profraw
+**/coverage/
+
+# ATTEST internal (keys and receipts stay local; the trust store is committed)
+.attest/*
+!.attest/trust/
+*.attest-receipt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+CLAUDE.md
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Code analysis reports
+target/tarpaulin-report.xml
+target/tarpaulin-report.html
+target/criterion/
+
+# Security analysis reports
+target/security-audit-report.html
+target/security-audit-report.json
+target/geiger-report.json

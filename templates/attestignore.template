@@ -1,0 +1,38 @@
+# ATTEST ignore patterns
+# Lines starting with # are comments
+
+# ATTEST internal files
+.attest/
+*.attest-receipt
+*.attestation
+
+# Version control
+.git/
+.svn/
+.hg/
+
+# Build outputs
+target/
+build/
+dist/
+out/
+
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
+*.bak

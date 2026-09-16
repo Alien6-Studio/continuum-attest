@@ -1,0 +1,42 @@
+{
+  "SLSA": {
+    "buildType": "https://mobyproject.org/buildkit@v1",
+    "builder": {
+      "id": ""
+    },
+    "invocation": {
+      "configSource": {
+        "entryPoint": "Dockerfile"
+      },
+      "parameters": {
+        "frontend": "dockerfile.v0",
+        "locals": [
+          { "name": "context" },
+          { "name": "dockerfile" }
+        ]
+      },
+      "environment": {
+        "platform": "linux/amd64"
+      }
+    },
+    "metadata": {
+      "buildInvocationID": "wsl6yqcgd2c3k0nqe8a4d5f6g",
+      "buildStartedOn": "2026-08-27T09:38:02.114281476Z",
+      "buildFinishedOn": "2026-08-27T09:41:11.892763314Z",
+      "completeness": {
+        "parameters": true,
+        "environment": true,
+        "materials": false
+      },
+      "reproducible": false
+    },
+    "materials": [
+      {
+        "uri": "pkg:docker/alpine@3.20?platform=linux%2Famd64",
+        "digest": {
+          "sha256": "b3119ad9ca11a2b5aa9fc9cbdb6b9da0f2dcf6366ce9f3e1d9b0b3d0e6a5c4f3"
+        }
+      }
+    ]
+  }
+}

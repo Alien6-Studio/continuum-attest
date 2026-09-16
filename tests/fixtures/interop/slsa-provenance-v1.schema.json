@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://slsa.dev/provenance/v1",
+  "title": "in-toto Statement v1 with SLSA Provenance v1 predicate",
+  "description": "JSON Schema transcription of the in-toto Statement v1 layer (https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md) and the SLSA Provenance v1 predicate (https://slsa.dev/spec/v1.0/provenance). Committed under tests/fixtures/ because slsa-verifier is not available in CI (acceptance criterion 3).",
+  "type": "object",
+  "required": ["_type", "subject", "predicateType", "predicate"],
+  "properties": {
+    "_type": {
+      "const": "https://in-toto.io/Statement/v1"
+    },
+    "subject": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/ResourceDescriptor" }
+    },
+    "predicateType": {
+      "const": "https://slsa.dev/provenance/v1"
+    },
+    "predicate": {
+      "type": "object",
+      "required": ["buildDefinition", "runDetails"],
+      "properties": {
+        "buildDefinition": {
+          "type": "object",
+          "required": ["buildType", "externalParameters"],
+          "properties": {
+            "buildType": { "type": "string", "format": "uri" },
+            "externalParameters": { "type": "object" },
+            "internalParameters": { "type": "object" },
+            "resolvedDependencies": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/ResourceDescriptor" }
+            }
+          }
+        },
+        "runDetails": {
+          "type": "object",
+          "required": ["builder"],
+          "properties": {
+            "builder": {
+              "type": "object",
+              "required": ["id"],
+              "properties": {
+                "id": { "type": "string", "format": "uri" },
+                "builderDependencies": {
+                  "type": "array",
+                  "items": { "$ref": "#/definitions/ResourceDescriptor" }
+                },
+                "version": { "type": "object" }
+              }
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "invocationId": { "type": "string" },
+                "startedOn": { "type": "string", "format": "date-time" },
+                "finishedOn": { "type": "string", "format": "date-time" }
+              }
+            },
+            "byproducts": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/ResourceDescriptor" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "ResourceDescriptor": {
+      "type": "object",
+      "description": "https://github.com/in-toto/attestation/blob/main/spec/v1/resource_descriptor.md — at least one of uri, digest or content is required.",
+      "anyOf": [
+        { "required": ["uri"] },
+        { "required": ["digest"] },
+        { "required": ["content"] }
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "uri": { "type": "string", "format": "uri" },
+        "digest": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-f0-9]+$"
+          }
+        },
+        "content": { "type": "string" },
+        "downloadLocation": { "type": "string", "format": "uri" },
+        "mediaType": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    }
+  }
+}

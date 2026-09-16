@@ -1,0 +1,4 @@
+[tool.tarpaulin.default]
+timeout = "300s"
+run-types = ["Tests", "Doctests", "Benchmarks"]
+include-tests = true

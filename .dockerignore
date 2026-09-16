@@ -1,0 +1,7 @@
+target/
+.git/
+.attest/cache/
+.attest/keys/
+.attest/objects/
+.attest/receipts/
+.github/

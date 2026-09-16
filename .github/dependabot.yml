@@ -1,0 +1,20 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # One PR for the routine patch churn, individual PRs for anything
+      # that can actually change behaviour.
+      patch-updates:
+        update-types: ["patch"]
+
+  # Actions are executable inputs to the release. They get the same
+  # attention as crates.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

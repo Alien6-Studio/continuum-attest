@@ -1,0 +1,12 @@
+version = 1
+
+[[key]]
+id = "259e1e9bc74270ad460c9b2b8ffe7273"
+name = "gitlab-ci"
+status = "revoked"
+revoked_at = "2026-09-16T11:52:50.941582602Z"
+
+[[key]]
+id = "fa7d816e5b2f0ede87ae8969b95eae5c"
+name = "release-2026"
+status = "trusted"
