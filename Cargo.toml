@@ -53,7 +53,7 @@ zstd = "0.13"
 # System interaction
 tempfile = "3.8"
 walkdir = "2.4"
-which = "4.4"
+which = "8.0"
 num_cpus = "1.16"
 uuid = { version = "1.0", features = ["v4"] }
 async-trait = "0.1"
