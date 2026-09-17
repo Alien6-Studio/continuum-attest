@@ -1,0 +1,41 @@
+name: Bug report
+description: Something behaves differently from what it claims.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this lets someone forge, alter, or bypass a receipt, stop and read
+        [SECURITY.md](../blob/main/SECURITY.md) instead. Do not file it here.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `attest --version`.
+      placeholder: "attest 0.1.0"
+    validations: { required: true }
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "Ubuntu 24.04 x86_64 / macOS 15 arm64"
+    validations: { required: true }
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: >
+        The commands you ran, in order. A minimal `attest.yaml` and the
+        receipt involved help more than anything else.
+      render: console
+    validations: { required: true }
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+      description: Include the exit code — 0, 1 and 2 mean different things.
+    validations: { required: true }

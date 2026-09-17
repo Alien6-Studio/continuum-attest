@@ -1,0 +1,26 @@
+name: Feature request
+description: Something attest should do and does not.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Governance engines, Kubernetes controllers and telemetry belong in a
+        plugin, not in this binary — see
+        [the plugin protocol](https://attest.continuu.ms/en/docs/plugin-protocol/).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to prove or check that you currently cannot?
+    validations: { required: true }
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: >
+        If it touches the receipt format, say how existing receipts and their
+        signatures stay valid.
+    validations: { required: true }

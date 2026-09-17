@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # One PR for the routine patch churn, individual PRs for anything
+      # that can actually change behaviour.
+      patch-updates:
+        update-types: ["patch"]
+
+      # The signing stack is version-coupled: ed25519-dalek 3 requires
+      # rand_core 0.10, so proposing them separately produces two PRs that
+      # cannot build on their own. They move together or not at all.
+      signing-stack:
+        patterns:
+          - "ed25519*"
+          - "rand"
+          - "rand_core"
+          - "signature"
+
+  # Actions are executable inputs to the release. They get the same
+  # attention as crates.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

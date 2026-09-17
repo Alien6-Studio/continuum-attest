@@ -1,0 +1,103 @@
+# attest wrap-mode composite action for GitHub Actions.
+#
+# Attests what an existing job already runs, without migrating it to an
+# attest pipeline: hashes the declared inputs before the command and the
+# declared outputs after it, and writes a receipt under
+# `.attest/receipts/`.
+#
+# The binary is pinned by version AND sha256; the download is refused on
+# any mismatch. No `curl | sh`.
+#
+# Usage:
+#
+#   - uses: Alien6-Studio/continuum-attest/ci-templates/github/attest-action@v0.1.0
+#     with:
+#       version: "0.1.0"
+#       sha256: "<sha256 of attest-v0.1.0-linux-x86_64.tar.gz>"
+#       step-name: "build"
+#       inputs: "src Cargo.toml"
+#       outputs: "target/release/app"
+#       command: "cargo build --release"
+#
+# The sha256 of every asset is published in the release's SHA256SUMS file.
+# Pin the action itself to a tag or a commit, never to a branch.
+
+name: "attest wrap"
+description: "Run a command under attest run --wrap and produce a receipt"
+
+inputs:
+  version:
+    description: "attest release version to download, without the leading v"
+    required: true
+  sha256:
+    description: "Expected sha256 of the release tarball (pinned)"
+    required: true
+  step-name:
+    description: "Step name recorded in the receipt"
+    required: true
+  command:
+    description: "Command to wrap (run via sh -c)"
+    required: true
+  inputs:
+    description: "Space-separated declared input paths"
+    required: false
+    default: ""
+  outputs:
+    description: "Space-separated declared output paths"
+    required: false
+    default: ""
+  extra-args:
+    description: "Extra flags for attest run --wrap (e.g. --sign)"
+    required: false
+    default: ""
+  base-url:
+    description: "Override the release store, e.g. an internal mirror"
+    required: false
+    default: "https://github.com/Alien6-Studio/continuum-attest/releases/download"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install pinned attest binary
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        SHA256: ${{ inputs.sha256 }}
+        BASE_URL: ${{ inputs.base-url }}
+      run: |
+        set -euo pipefail
+        PKG="attest-v${VERSION}-linux-x86_64.tar.gz"
+        curl -fsSLo "$PKG" "${BASE_URL}/v${VERSION}/${PKG}"
+        echo "${SHA256}  ${PKG}" | sha256sum -c -
+        tar -xzf "$PKG" attest
+        chmod +x attest
+        echo "$PWD" >> "$GITHUB_PATH"
+
+    # Inputs reach the shell through the environment, never through
+    # ${{ }} interpolation into the script body: a command containing a
+    # quote would otherwise break out of it.
+    - name: Wrap command with attest
+      shell: bash
+      env:
+        STEP_NAME: ${{ inputs.step-name }}
+        COMMAND: ${{ inputs.command }}
+        DECLARED_INPUTS: ${{ inputs.inputs }}
+        DECLARED_OUTPUTS: ${{ inputs.outputs }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -euo pipefail
+        set -- run --wrap --name "$STEP_NAME"
+        for path in $DECLARED_INPUTS;  do set -- "$@" --input  "$path"; done
+        for path in $DECLARED_OUTPUTS; do set -- "$@" --output "$path"; done
+        # shellcheck disable=SC2086
+        attest "$@" $EXTRA_ARGS -- sh -c "$COMMAND"
+
+    - name: Upload receipts
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: attest-receipts-${{ inputs.step-name }}
+        path: .attest/receipts/
+        # `.attest/` is hidden; without this the action uploads nothing and
+        # if-no-files-found below fails every run.
+        include-hidden-files: true
+        if-no-files-found: error

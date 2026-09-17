@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to the same ref makes the previous run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # rustfmt and clippy are pinned, deliberately. Both change their output
+  # and gain lints between Rust releases, so a floating toolchain lets an
+  # unrelated release turn an unchanged commit red. Tests still run on
+  # floating stable below, which is where real breakage should surface.
+  # Bump this by hand.
+  lint:
+    name: lint (rust 1.98.1)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # --lib --bins, not --all-targets: the workspace enables
+      # clippy::unwrap_used, which is denied in the library and expected in
+      # test code.
+      - name: Clippy
+        run: cargo clippy --lib --bins --locked -- -D warnings
+
+      # clippy above covers --lib --bins only, so nothing would gate rustc
+      # warnings in test code. That gap is not theoretical: a criterion bump
+      # slid 39 deprecations past a green build. Pinned toolchain, so this
+      # cannot fail on a lint that did not exist when the code was written.
+      - name: Warnings in every target
+        run: cargo check --all-targets --locked
+
+  # The invariants are only worth what their teeth are worth. This breaks
+  # each protection in turn and requires the matching test to fail, so a
+  # check that stops being exercised is caught here rather than by the next
+  # auditor. Pinned toolchain for the same reason as the lint job.
+  invariants:
+    name: security invariants have teeth
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: The invariants pass on the real code
+        run: |
+          cargo test --locked --test security_invariants
+          cargo test --locked --test encoding_injectivity
+          cargo test --locked --test hash_hygiene
+
+      - name: Each protection, removed, fails its invariant
+        run: tools/mutation-gate.sh
+
+  gates:
+    name: gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux and macOS only. The unix-specific paths (0o600 on private
+        # keys, 0o700 on the connection directory) are `#[cfg(unix)]` with
+        # no Windows equivalent, so a Windows build would write key
+        # material without the intended permissions. See issue tracker
+        # before adding windows-latest here.
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Test
+        run: cargo test --locked
+
+  # The declared MSRV is the tested MSRV: the toolchain comes from
+  # Cargo.toml, so the two cannot drift. Checked against the committed
+  # Cargo.lock, which is what `--locked` resolves to.
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$v" ]; then echo "no rust-version in Cargo.toml" >&2; exit 1; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $v"
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - run: cargo check --all-targets --locked
+
+  dogfood:
+    name: attest attests itself
+    runs-on: ubuntu-latest
+    needs: [lint, gates, invariants]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # attest.yaml runs cargo fmt and cargo clippy as pipeline steps, so
+      # this job needs both components. Pinned to the lint gate's toolchain:
+      # the receipt this job signs should describe a build someone else can
+      # reproduce, which a floating toolchain does not give you.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build attest
+        run: cargo build --release --locked
+
+      # Unsigned, on every event including pushes to main. The signing key
+      # lives in the `release` environment and no job here can reach it,
+      # deliberately. A receipt from this job is a demonstration with a
+      # fortnight's retention that nobody consumes; producing it would
+      # require the key to be readable by every workflow run. That is a poor
+      # trade for a project whose argument is that you need not trust the
+      # machine. Signing itself is covered by the test suite, and the receipt
+      # that is actually evidence -- the one published with a release -- is
+      # signed under environment protection in release.yml, which refuses to
+      # ship unsigned.
+      #
+      # No --timestamp either: timestamping matters for evidence outliving
+      # the run, and an authority being unreachable must never fail a pull
+      # request.
+      - name: Run the attested pipeline
+        run: ./target/release/attest run --verify
+
+      # Everything except the signature, which an unsigned receipt does not
+      # carry. --recompute is what matters here: it re-derives the pipeline,
+      # input and output hashes from the workspace.
+      - name: Verify the receipts independently
+        run: |
+          ./target/release/attest verify .attest/receipts/*.yaml \
+            --recompute \
+            --trust-store .attest/trust \
+            --check-signatures false \
+            --format text
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: receipts
+          path: .attest/receipts/
+          # `.attest/` is hidden; without this the action uploads nothing.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

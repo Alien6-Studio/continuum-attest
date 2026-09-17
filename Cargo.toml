@@ -1,0 +1,159 @@
+[package]
+# The crate is published as `continuum-attest`: `attest` is taken on
+# crates.io by an unrelated test framework. The library and the binary keep
+# the short name (see [lib] and [[bin]] below), so `use attest::…` and the
+# `attest` command are unchanged.
+name = "continuum-attest"
+version = "0.1.0"
+edition = "2021"
+authors = ["Alien6 Studio <contact@alien6.com>"]
+description = "Verifiable CI/CD with cryptographic attestation"
+# Minimum supported Rust version, verified in CI against the committed
+# Cargo.lock. Determined by the locked dependency graph, not by this
+# crate's own syntax: `time`, `globset` and the `icu_*` family declare
+# 1.88. Raising it is a deliberate decision, not a side effect of a bump.
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/Alien6-Studio/continuum-attest"
+homepage = "https://attest.continuu.ms"
+documentation = "https://attest.continuu.ms/en/docs/"
+readme = "README.md"
+keywords = ["ci", "cd", "attestation", "verification", "reproducible"]
+categories = ["development-tools", "command-line-utilities"]
+# Keep the published package to source, tests, licence and the CI
+# templates consumers actually use. Everything else is repository
+# furniture: our own trust store, our linter configuration, our CI.
+exclude = [
+  ".attest/",
+  ".github/",
+  ".gitlab-ci.yml",
+  ".trunk/",
+  "target/",
+]
+
+[lints.clippy]
+unwrap_used = "warn"
+
+[dependencies]
+# CLI & configuration
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+
+# Crypto & attestation
+blake3 = "1.5"
+ed25519-dalek = { version = "2.0", features = ["rand_core", "pkcs8", "pem"] }
+rand = "0.8"
+hex = "0.4"
+toml = "0.8"
+tar = "0.4"
+zstd = "0.13"
+
+# System interaction
+tempfile = "3.8"
+walkdir = "2.4"
+which = "4.4"
+num_cpus = "1.16"
+uuid = { version = "1.0", features = ["v4"] }
+async-trait = "0.1"
+
+# Unix system calls for isolation
+libc = "0.2"
+
+# Async & parallelism
+tokio = { version = "1.0", features = ["full"] }
+
+# Error handling & logging
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Pattern matching for .attestignore
+ignore = "0.4"
+
+# Encoding: DSSE envelopes and PEM handling
+base64 = "0.22"
+
+# Signature verification for RFC 3161 timestamp tokens. Already in the
+# dependency graph underneath rustls, so this adds no new supply-chain
+# surface — and it means not writing a line of RSA ourselves.
+ring = "0.17"
+
+# HTTP client for the opt-in receipt delivery worker. rustls, not OpenSSL:
+# no system TLS dependency to build or audit.
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "stream",
+  "blocking",
+  "rustls-tls",
+] }
+
+# This crate has no cargo features. Every capability it advertises is
+# compiled unconditionally, so `attest --version` fully determines what a
+# binary can do. Governance, Kubernetes and telemetry live in separate
+# plugin programs; see the plugin protocol on the documentation site.
+# That protocol is a draft: this release implements none of it.
+
+[dev-dependencies]
+# default-features = false drops the remote $ref resolvers, and with them a
+# second copy of reqwest in the dependency graph. The tests only ever compile
+# local schemas.
+jsonschema = { version = "0.17", default-features = false }
+assert_cmd = "2.0"
+# Test-only: concurrency harnesses (futures::future::join_all) and glob
+# matching. Both used to sit in [dependencies] without the core ever
+# touching them.
+futures = "0.3"
+globset = "0.4"
+predicates = "3.0"
+tokio-test = "0.4"
+scopeguard = "1.2"
+
+[lib]
+name = "attest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "attest"
+path = "src/main.rs"
+
+[[bench]]
+name = "pipeline_performance"
+path = "tests/benchmarks/pipeline_performance.rs"
+harness = false
+
+[dev-dependencies.criterion]
+version = "0.5"
+features = ["html_reports"]
+
+# Note: Security patches applied through dependency version updates
+
+# Performance optimizations for different build profiles
+[profile.release]
+# Enable full optimizations for release builds
+opt-level = 3
+lto = "fat"       # Full Link Time Optimization
+codegen-units = 1 # Better optimization, slower compile
+panic = "abort"   # Smaller binaries, faster execution
+strip = "symbols" # Remove debug symbols in release
+
+[profile.dev]
+# Faster compilation for development
+opt-level = 0
+debug = true
+incremental = true
+
+[profile.test]
+# Optimized for testing
+opt-level = 1
+debug = true
+
+[profile.bench]
+# Maximum performance for benchmarks
+inherits = "release"
+debug = true         # Keep debug info for profiling

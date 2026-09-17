@@ -1,0 +1,37 @@
+# Who is asked to look at what.
+#
+# One maintainer today. This file names them rather than a team, because a
+# CODEOWNERS entry pointing at a team that does not exist is silently inert:
+# no review is ever requested and nothing says so. Replace these with a team
+# handle the day there is a team, not before.
+#
+# A warning worth keeping here, for whoever enables branch protection. GitHub
+# will not let anyone approve their own pull request. So turning on "require
+# review from Code Owners" while a single person owns everything blocks that
+# person from merging anything of their own. Leave it off until there are two
+# maintainers, or keep the administrator bypass. The value of this file in
+# the meantime is that outside contributions land in front of someone
+# automatically.
+
+# Default owner for everything.
+*                           @Coopyrightdmin
+
+# Paths where a mistake is not merely a bug: the signed wire format, the
+# verification path, key handling, and the plugin boundary.
+/src/crypto/                @Coopyrightdmin
+/src/keys.rs                @Coopyrightdmin
+/src/verify.rs              @Coopyrightdmin
+/src/storage/receipt_format.rs @Coopyrightdmin
+
+# The hashing rules and the invariants that guard them. Both decide what a
+# receipt means; changing either silently is how a guarantee stops being one.
+/src/hashing.rs             @Coopyrightdmin
+/src/storage/causal_ledger.rs @Coopyrightdmin
+/tests/security_invariants.rs @Coopyrightdmin
+/tools/mutation-gate.sh     @Coopyrightdmin
+
+# Release and supply-chain configuration.
+/.github/workflows/         @Coopyrightdmin
+/deny.toml                  @Coopyrightdmin
+/LICENSE                    @Coopyrightdmin
+/NOTICE                     @Coopyrightdmin
