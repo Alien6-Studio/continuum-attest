@@ -1,0 +1,96 @@
+name: Publish crate
+
+# crates.io is published from here rather than from a laptop, for the same
+# reason the binaries are: a release nobody can reproduce is a release nobody
+# can check.
+#
+# Two triggers, because the first publish cannot use the second path:
+#
+#   release: published   the durable route. Every GitHub release publishes the
+#                        matching version, after the binaries and the SBOM are
+#                        already attached.
+#   workflow_dispatch    the bootstrap and the recovery route. A tag whose own
+#                        workflow predates this file can still be published,
+#                        and a run that dies between `package` and `publish`
+#                        can be retried without cutting a new tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, e.g. v0.1.0"
+        required: true
+        type: string
+      auth:
+        # Trusted publishing needs the crate to exist and to be owned by the
+        # caller, so it cannot create it. The first publish therefore uses a
+        # token scoped to `publish-new` on this crate alone; every one after
+        # uses the OIDC exchange and no long-lived secret.
+        description: "How to authenticate against crates.io"
+        required: true
+        default: trusted
+        type: choice
+        options: [trusted, token]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    # The same environment that gates the GitHub release. The trusted
+    # publishing configuration names it too, so a workflow that skipped the
+    # environment could not obtain a token even if it ran in this repository.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # OIDC exchange with crates.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          persist-credentials: false
+
+      # Pinned to match ci.yml and release.yml: a publish must not fail on a
+      # lint or a resolver change that did not exist when the tag was cut.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      # The tag and the manifest must agree. Publishing 0.1.0 from a tree
+      # tagged v0.2.0 would put a version on crates.io that matches no
+      # release, and crates.io versions cannot be deleted afterwards.
+      - name: Check the tag against Cargo.toml
+        env:
+          REF: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "v$manifest" != "$REF" ]; then
+            echo "tag $REF does not match Cargo.toml version $manifest" >&2
+            exit 1
+          fi
+          echo "publishing $manifest from $REF"
+
+      # --locked so what reaches crates.io is built from the reviewed
+      # Cargo.lock, not from whatever the resolver prefers today.
+      - name: Package and verify
+        run: cargo publish --locked --dry-run
+
+      - name: Authenticate with crates.io
+        id: auth
+        if: inputs.auth != 'token'
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      # The token output is revoked by the action's post step when the job
+      # ends; CARGO_REGISTRY_TOKEN is only read on the bootstrap run and the
+      # secret is deleted once trusted publishing is configured.
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --no-verify
