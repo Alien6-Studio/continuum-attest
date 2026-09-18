@@ -20,9 +20,7 @@ component, open or otherwise, will ever be required to reach a verdict.
 
 [![Evidence your customer can check: a walkthrough of Continuum Attest](https://attest.continuu.ms/media/continuum-attest-en-v2/poster-en.webp)](https://attest.continuu.ms/en/)
 
-One minute twenty-seven. The link opens the player on the site rather than the
-file itself, because that is where the captions, the transcript and the silent
-cut are.
+One minute twenty-seven, in English, with captions and a transcript.
 
 ---
 
