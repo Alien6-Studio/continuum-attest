@@ -6,7 +6,7 @@
 name = "continuum-attest"
 version = "0.1.0"
 edition = "2021"
-authors = ["Alien6 Studio <contact@alien6.com>"]
+authors = ["Alien6 <contact@alien6.com>"]
 description = "Verifiable CI/CD with cryptographic attestation"
 # Minimum supported Rust version, verified in CI against the committed
 # Cargo.lock. Determined by the locked dependency graph, not by this
