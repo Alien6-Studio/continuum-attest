@@ -197,4 +197,4 @@ a public issue.
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Copyright 2025-2026 Alien6 Studio.
+Copyright 2025-2026 Alien6.
