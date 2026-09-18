@@ -16,6 +16,14 @@ Everything needed to verify a receipt is in this repository, under Apache-2.0.
 That is a commitment, not a description of the current state: no future
 component, open or otherwise, will ever be required to reach a verdict.
 
+## Watch it work
+
+[![Evidence your customer can check: a walkthrough of Continuum Attest](https://attest.continuu.ms/media/continuum-attest-en-v2/poster-en.webp)](https://attest.continuu.ms/en/)
+
+One minute twenty-seven. The link opens the player on the site rather than the
+file itself, because that is where the captions, the transcript and the silent
+cut are.
+
 ---
 
 ## Sixty seconds
