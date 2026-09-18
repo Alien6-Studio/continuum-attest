@@ -33,6 +33,16 @@ on:
         default: trusted
         type: choice
         options: [trusted, token]
+      dry_run:
+        # Stops after the token exchange. The trusted publishing
+        # configuration names a workflow file, and crates.io checks that name
+        # in the OIDC claim, so the only way to find out whether it was
+        # entered correctly is to ask for a token from this file. Waiting to
+        # find out during a real release means finding out too late.
+        description: "Exchange a token and stop, without publishing"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -90,7 +100,21 @@ jobs:
       # The token output is revoked by the action's post step when the job
       # ends; CARGO_REGISTRY_TOKEN is only read on the bootstrap run and the
       # secret is deleted once trusted publishing is configured.
+      - name: Confirm the token exchange
+        if: inputs.dry_run
+        env:
+          TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "crates.io returned no token: check the trusted publishing" >&2
+            echo "configuration -- owner, repository, workflow filename and" >&2
+            echo "environment must all match this run" >&2
+            exit 1
+          fi
+          echo "crates.io accepted this workflow; nothing was published"
+
       - name: Publish
+        if: ${{ !inputs.dry_run }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked --no-verify
