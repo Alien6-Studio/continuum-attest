@@ -2,6 +2,9 @@
 
 **Run a build. Get a signed receipt. Let anyone check it.**
 
+[![crates.io](https://img.shields.io/crates/v/continuum-attest.svg)](https://crates.io/crates/continuum-attest)
+[![CI](https://github.com/Alien6-Studio/continuum-attest/actions/workflows/ci.yml/badge.svg)](https://github.com/Alien6-Studio/continuum-attest/actions/workflows/ci.yml)
+[![MSRV](https://img.shields.io/crates/msrv/continuum-attest.svg)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 `attest` runs your pipeline, hashes every declared input and output, and writes

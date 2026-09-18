@@ -6,7 +6,7 @@ The next steps focus on the handoff between those two people: what to trust,
 what to distribute, and what a successful verification actually establishes.
 
 This is the proposed development order for the open-source CLI and formats.
-The 0.1 baseline is implemented; later milestones describe planned work.
+0.1 is released; later milestones describe planned work.
 There are no target dates. Each milestone has a completion criterion, and
 security fixes can ship independently of this sequence.
 
