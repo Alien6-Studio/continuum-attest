@@ -10,6 +10,12 @@ use serde::Serialize;
 
 use crate::storage::{receipt_signing_bytes, Receipt};
 
+/// Structural contract for one NDJSON receipt-file verification result.
+/// Applies to `attest verify --format json`, excluding archive and interop results.
+/// A conforming verdict may fail, skip checks or contain warnings. Consumers must
+/// separately enforce their receipt identity, trust and acceptance policies.
+pub const VERDICT_JSON_SCHEMA: &str = include_str!("../schemas/verification-result-v1.schema.json");
+
 /// Options for a verification run, mapped 1:1 from the CLI flags.
 pub struct VerifyOptions {
     pub check_signatures: bool,

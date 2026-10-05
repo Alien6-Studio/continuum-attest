@@ -44,17 +44,28 @@ key in the store `--sign` picks it up on its own; once there are several, pass
 
 The last command re-reads your workspace, recomputes the input hashes from the
 files on disk, and checks them against what the receipt claims. It exits 0 only
-if all four checks pass:
+if no check fails:
 
 | Check | Question it answers |
 |---|---|
 | `schema` | Is this a well-formed receipt of a version I understand? |
 | `consistency` | Do the receipt's internal references hold together? |
 | `signature` | Was it signed by a key in the trust store, before that key was revoked? |
+| `timestamp` | Does the independent timestamp satisfy the configured trust policy? |
 | `recompute` | Do the declared inputs still hash to what the receipt recorded? |
 
 Exit codes are `0` pass, `1` verification failure, `2` operational error — the
 same convention across every command, so CI can branch on them.
+
+`attest verify --format json RECEIPT` emits one NDJSON record per receipt file. The
+[verification result v1 schema](schemas/verification-result-v1.schema.json)
+defines its fields and five named checks (archive and interop results have
+separate contracts). Rust clients can load it from
+`attest::verify::VERDICT_JSON_SCHEMA`. Schema validity is structural, not
+permission to accept an artifact: a `pass` can include skipped checks or warnings.
+Consumers must bind the receipt and signer they expect and enforce their own
+required checks and warning policy. Operational errors use stderr and exit 2,
+not a fabricated JSON verification result.
 
 ## A pipeline
 
