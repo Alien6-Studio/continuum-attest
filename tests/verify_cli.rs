@@ -141,6 +141,7 @@ fn json_format_parses() {
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 1, "one NDJSON line per receipt");
     let obj: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_verdict_contract(&obj);
     assert_eq!(obj["verdict"], "pass");
     assert!(obj["receipt"].as_str().unwrap().ends_with(".yaml"));
     assert!(obj["checks"].as_array().unwrap().len() >= 3);
@@ -273,4 +274,115 @@ fn pre_versioning_receipt_still_verifies() {
         .current_dir(tmp.path())
         .assert()
         .code(0);
+}
+
+fn assert_verdict_contract(value: &serde_json::Value) {
+    let schema: serde_json::Value =
+        serde_json::from_str(attest::verify::VERDICT_JSON_SCHEMA).unwrap();
+    let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
+    assert!(validator.is_valid(value), "invalid verdict: {value}");
+}
+
+#[test]
+fn json_contract_covers_unsigned_and_failed_verification() {
+    let tmp = tempfile::tempdir().unwrap();
+    let receipt = produce_receipt(tmp.path(), false);
+    for future_schema in [false, true] {
+        if future_schema {
+            let mut value = load_yaml(&receipt);
+            value["schema_version"] = serde_yaml::Value::Number(99.into());
+            save_yaml(&receipt, &value);
+        }
+        let output = attest()
+            .args([
+                "verify",
+                "--format",
+                "json",
+                "--check-signatures",
+                "false",
+                receipt.to_str().unwrap(),
+            ])
+            .current_dir(tmp.path())
+            .assert()
+            .code(if future_schema { 1 } else { 0 })
+            .get_output()
+            .stdout
+            .clone();
+        let verdict: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_verdict_contract(&verdict);
+        assert_eq!(
+            verdict["verdict"],
+            if future_schema { "fail" } else { "pass" }
+        );
+        assert!(verdict["signed_by"].is_null());
+        assert!(verdict["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["status"] == "skipped"));
+    }
+}
+
+#[test]
+fn json_contract_rejects_ambiguous_or_malformed_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let receipt = produce_receipt(tmp.path(), true);
+    let output = attest()
+        .args(["verify", "--format", "json", receipt.to_str().unwrap()])
+        .current_dir(tmp.path())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let original: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(attest::verify::VERDICT_JSON_SCHEMA).unwrap();
+    let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
+    let mut reordered = original.clone();
+    reordered["checks"].as_array_mut().unwrap().reverse();
+    assert!(
+        validator.is_valid(&reordered),
+        "check order is not an acceptance policy"
+    );
+    let mut warning = original.clone();
+    warning["warnings"] = serde_json::json!(["consumer must decide whether to accept"]);
+    assert!(
+        validator.is_valid(&warning),
+        "the schema is structural, not authorization"
+    );
+    for field in ["receipt", "verdict", "checks", "signed_by", "warnings"] {
+        let mut value = original.clone();
+        value.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&value), "accepted missing {field}");
+    }
+    let malformed = [
+        ("/receipt", serde_json::json!(null)),
+        ("/verdict", serde_json::json!("unknown")),
+        ("/signed_by", serde_json::json!(123)),
+        ("/warnings", serde_json::json!([true])),
+        ("/checks", serde_json::json!([])),
+        ("/checks/0", original["checks"][1].clone()),
+        ("/checks/0/name", serde_json::json!("future")),
+        ("/checks/0/status", serde_json::json!("unknown")),
+        ("/checks/0/detail", serde_json::json!(null)),
+    ];
+    for (pointer, replacement) in malformed {
+        let mut value = original.clone();
+        *value.pointer_mut(pointer).unwrap() = replacement;
+        assert!(!validator.is_valid(&value), "accepted malformed {pointer}");
+    }
+    for pointer in ["", "/checks/0"] {
+        let mut value = original.clone();
+        value
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown".to_owned(), serde_json::json!(true));
+        assert!(
+            !validator.is_valid(&value),
+            "accepted unknown field in {pointer}"
+        );
+    }
 }
