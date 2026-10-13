@@ -759,7 +759,7 @@ mod tests {
             total_duration_secs: 30,
             signature: None,
             signer_public_key: None,
-            attest_version: "0.1.0".to_string(),
+            attest_version: env!("CARGO_PKG_VERSION").to_string(),
             causal_events: vec![],
             causal_chain_hash: None,
             reproducibility: None,
@@ -794,7 +794,7 @@ mod tests {
         );
         assert_eq!(
             statement.predicate.run_details.builder.id,
-            "https://alien6.com/attest@v0.1.0"
+            format!("https://alien6.com/attest@v{}", env!("CARGO_PKG_VERSION"))
         );
 
         let first = serde_json::to_string(&statement).expect("json");

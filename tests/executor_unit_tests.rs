@@ -249,7 +249,7 @@ async fn test_executor_creation_and_basic_execution() -> Result<()> {
 
     // Verify receipt
     assert_eq!(receipt.steps.len(), 3);
-    assert_eq!(receipt.attest_version, "0.1.0");
+    assert_eq!(receipt.attest_version, env!("CARGO_PKG_VERSION"));
     // Steps run in well under a second, so this whole-second counter can
     // legitimately be 0 - just sanity-check it's a valid (non-negative) value.
     let _ = receipt.total_duration_secs;

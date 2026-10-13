@@ -270,9 +270,14 @@ to ask you to trust an unattested download.
 
 ## Status
 
-Version 0.1. The core — pipelines, hashing, capsules, receipts, trust store,
+Version 0.2. The core — pipelines, hashing, capsules, receipts, trust store,
 verification, causal ledger, in-toto/SLSA interop — is implemented and covered
-by the test suite, and `attest` attests its own CI on every commit.
+by the test suite, and `attest` attests its own CI on every commit. 0.2 adds
+trust that can be shared: signed trust bundles with pinned issuers, handover
+and rollback protection, verdicts under an explicit policy that name what they
+could not establish, a receipt that says which isolation controls were in
+force, inputs held still while a step runs, and a release whose evidence is
+bound to the exact bytes it publishes and signed in a job that builds nothing.
 
 Interfaces that carry a `schema_version` (receipts, `attest.yaml`) follow a
 documented compatibility policy: older receipts stay verifiable, and a receipt

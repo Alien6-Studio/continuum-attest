@@ -23,7 +23,7 @@ fn test_cli_version() {
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::contains("0.1.0"));
+        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

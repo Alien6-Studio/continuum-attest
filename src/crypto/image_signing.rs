@@ -343,7 +343,7 @@ fn write_signing_receipt(
         total_duration_secs: 0,
         signature: None,
         signer_public_key: None,
-        attest_version: "0.1.0".to_string(),
+        attest_version: env!("CARGO_PKG_VERSION").to_string(),
         causal_events: vec![],
         causal_chain_hash: None,
         reproducibility: None,

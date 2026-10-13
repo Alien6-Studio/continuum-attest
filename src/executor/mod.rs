@@ -545,7 +545,7 @@ impl<'a> Executor<'a> {
             total_duration_secs: total_duration.as_secs(),
             signature: None,
             signer_public_key: None,
-            attest_version: "0.1.0".to_string(),
+            attest_version: env!("CARGO_PKG_VERSION").to_string(),
             causal_events,
             causal_chain_hash,
             reproducibility: None,

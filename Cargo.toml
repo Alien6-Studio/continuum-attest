@@ -4,7 +4,7 @@
 # the short name (see [lib] and [[bin]] below), so `use attest::…` and the
 # `attest` command are unchanged.
 name = "continuum-attest"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Alien6 <contact@alien6.com>"]
 description = "Verifiable CI/CD with cryptographic attestation"

@@ -234,7 +234,7 @@ async fn test_executor_creation_and_basic_execution() -> Result<()> {
 
     // Verify receipt
     assert_eq!(receipt.steps.len(), 3);
-    assert_eq!(receipt.attest_version, "0.1.0");
+    assert_eq!(receipt.attest_version, env!("CARGO_PKG_VERSION"));
 
     // Verify step execution order
     let step_names: Vec<&str> = receipt.steps.iter().map(|s| s.name.as_str()).collect();
