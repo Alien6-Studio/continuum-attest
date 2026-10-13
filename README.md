@@ -230,8 +230,13 @@ release workflow holds itself to; across platforms they differ by nature.
 
 Signed release binaries are published on the
 [releases page](https://github.com/Alien6-Studio/continuum-attest/releases) with
-checksums, an SBOM, and SLSA provenance. It would be strange for this project in
-particular to ask you to trust an unattested download.
+checksums, an SBOM, build inputs, the source package and SLSA provenance. One
+signed, timestamped attest receipt covers that whole set, byte for byte: the
+publish step recomputes the receipt's input manifest over the files it is about
+to publish and refuses the release on any difference, so the checksums, the
+SBOM, the provenance and the receipt describe the same artifacts, not merely
+the same source revision. It would be strange for this project in particular
+to ask you to trust an unattested download.
 
 ## Status
 

@@ -196,10 +196,16 @@ jobs:
     # only path to a signature -- and protection rules on the environment can
     # require a human to approve even that.
     environment: release
-    needs: gates
+    # After every artifact exists: this job attests the project's own build
+    # and, separately, the exact set of files the release will publish.
+    needs: [gates, build, crate, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: "1.98.1"
@@ -232,6 +238,16 @@ jobs:
             --key "${{ vars.ATTEST_KEY_ID }}"
           ./target/release/attest verify .attest/receipts/*.yaml \
             --recompute --trust-store .attest/trust --format text
+
+      # One receipt over every file the release publishes: binaries,
+      # checksums, build-info, SBOM, source package. Its input manifest is
+      # what the publish job recomputes over the bytes it is about to
+      # publish; a release whose artifacts differ from this set is refused.
+      - name: Attest the published artifact set
+        run: |
+          ls -R artifacts
+          tools/release-binding.sh attest "${{ vars.ATTEST_KEY_ID }}"
+          tools/release-binding.sh check .attest/receipts/receipt_*_release-artifacts_*.yaml
 
       # include-hidden-files: `.attest/` is a dotted directory and the action
       # skips hidden paths by default, so the receipts silently never
@@ -295,6 +311,48 @@ jobs:
         with:
           path: artifacts
 
+      # The receipts are evidence about ./artifacts, not part of the set the
+      # evidence covers; they move aside before the set is checked.
+      - name: Separate the evidence from what it describes
+        run: mv artifacts/receipts receipts
+
+      # The binary that checks the release is the release's own, from the
+      # tarball about to be published, not a fresh build of unknown origin.
+      - name: Unpack the release's own verifier
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/attest"
+          tar -xzf artifacts/linux-x86_64/attest-*-linux-x86_64.tar.gz -C "$RUNNER_TEMP/attest"
+          "$RUNNER_TEMP/attest/attest" --version
+
+      # Refuse to publish a set that differs, by a byte, from the one the
+      # attest-self job signed and timestamped. The receipt is checked first
+      # (trusted key, timestamp token, both required), then its input
+      # manifest is recomputed over ./artifacts and compared.
+      - name: Refuse a release whose artifacts differ from the attested set
+        env:
+          ATTEST: ${{ runner.temp }}/attest/attest
+        run: tools/release-binding.sh check receipts/receipt_*_release-artifacts_*.yaml
+
+      # On a rehearsal, prove the refusal has teeth: change one byte of one
+      # artifact and require the check to fail. A check that cannot be made
+      # to fail is decoration.
+      - name: The binding refuses a replaced artifact
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ATTEST: ${{ runner.temp }}/attest/attest
+        run: |
+          set -euo pipefail
+          target=$(find artifacts -name 'attest-*-macos-aarch64.tar.gz' | head -1)
+          cp "$target" "$RUNNER_TEMP/original"
+          printf 'x' | dd of="$target" bs=1 seek=100 conv=notrunc status=none
+          if tools/release-binding.sh check receipts/receipt_*_release-artifacts_*.yaml; then
+            echo "the binding accepted a replaced artifact; refusing to publish from a check with no teeth" >&2
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/original" "$target"
+          tools/release-binding.sh check receipts/receipt_*_release-artifacts_*.yaml
+
       - name: Collect assets
         run: |
           mkdir -p release
@@ -304,7 +362,7 @@ jobs:
           cp artifacts/sbom/attest-sbom.json release/
           # Not `|| true`: attest shipping a release with no receipt of its
           # own build is the one failure this project cannot paper over.
-          cp artifacts/receipts/*.yaml release/
+          cp receipts/*.yaml release/
           # One combined checksum file, so a user can check everything with a
           # single `shasum -c`. Built from a sorted listing rather than globs:
           # a glob that matches nothing would otherwise fail the step, and the
@@ -316,9 +374,15 @@ jobs:
 
       # GitHub-native build provenance: a signed SLSA attestation binding
       # each artifact digest to this workflow run.
+      # Every published subject, not only the binaries: the SBOM, the build
+      # inputs and the source package are what a recipient downloads too.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: "release/*.tar.gz"
+          subject-path: |
+            release/*.tar.gz
+            release/*.crate
+            release/*.build-info.json
+            release/attest-sbom.json
 
       - name: Sign artifacts with Sigstore (keyless)
         uses: sigstore/gh-action-sigstore-python@790bc6befb9d733738f18d8f895854b453640ec9 # v3.5.0
