@@ -123,7 +123,7 @@ impl KeyStore {
     /// Generate a new keypair, add it to the trust store as trusted, and
     /// return its key id. Refuses to overwrite existing key material.
     pub fn generate(&self, name: &str) -> Result<String> {
-        let mut csprng = rand::rngs::OsRng {};
+        let mut csprng = rand_core::OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         let id = key_id(&verifying_key);

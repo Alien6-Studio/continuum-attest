@@ -351,7 +351,7 @@ fn regenerate_fixtures() {
 
     // Only the raw 32-byte seed is committed: it carries no PEM framing,
     // so secret scanners never see key-shaped material in the repository.
-    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
     std::fs::create_dir_all(fixtures_dir()).expect("fixtures dir");
     std::fs::write(
         fixtures_dir().join("fixture.seed.hex"),
