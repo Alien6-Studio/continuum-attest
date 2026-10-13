@@ -184,10 +184,12 @@ you discover it during an audit:
   outside `trusted`/`revoked`, or naming a key whose file is missing or
   holds another key, does not load at all.
 - **Inputs are held still only inside a capsule, and the receipt says so.**
-  A capsule mounts each declared input read-only, and the runtime refuses the
-  write whatever the step runs as: that is enforced, and the `inputs` row of
-  the receipt's isolation block says `enforced` only when every step ran in
-  one. A local step gets its inputs' write bits dropped while it runs, which
+  A capsule step reads its declared inputs from a snapshot copied and hashed
+  when the receipt's input hash was taken, mounted read-only: the runtime
+  refuses a write from inside, and a change on the host during the step never
+  reaches the step's view. That is enforced, and the `inputs` row of the
+  receipt's isolation block says `enforced` only when every step ran in a
+  capsule. A local step gets its inputs' write bits dropped while it runs, which
   refuses a plain write and nothing more: a step that puts the bits back,
   changes an input, uses it and restores it before it ends is not caught,
   because the re-hash after the step sees the restored file. The row says

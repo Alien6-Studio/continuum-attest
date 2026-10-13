@@ -211,7 +211,7 @@ pub fn runtime_binary() -> Option<&'static str> {
 pub fn run_args(
     manifest: &CapsuleManifest,
     workspace: &Path,
-    inputs: &[PathBuf],
+    inputs: &InputMounts,
     command: &[String],
 ) -> Vec<String> {
     let mount = manifest.mounts.workspace.display().to_string();
@@ -225,14 +225,16 @@ pub fn run_args(
         format!("{}:{}", workspace.display(), mount),
     ];
     // Declared inputs are mounted read-only over the writable workspace
-    // mount, so the step's own view refuses a write to them; the runtime
-    // enforces it, whatever the step runs as. Sorted, so the argument
-    // vector is the same for the same declaration.
-    let mut sorted: Vec<&PathBuf> = inputs.iter().collect();
+    // mount, from a snapshot taken when they were hashed, so the step
+    // reads exactly the bytes the receipt describes: the runtime refuses
+    // a write from inside, and a change on the host during the step never
+    // reaches the view. Sorted, so the argument vector is the same for the
+    // same declaration.
+    let mut sorted: Vec<&PathBuf> = inputs.paths.iter().collect();
     sorted.sort();
     sorted.dedup();
     for input in sorted {
-        let host = workspace.join(input);
+        let host = inputs.root.join(input);
         if !host.exists() {
             continue;
         }
@@ -265,6 +267,21 @@ pub fn run_args(
     args
 }
 
+/// Declared inputs to mount read-only into a capsule, and the directory
+/// they are mounted from: the workspace itself, or a snapshot of it taken
+/// when the inputs were hashed.
+#[derive(Debug, Clone, Default)]
+pub struct InputMounts {
+    pub root: PathBuf,
+    pub paths: Vec<PathBuf>,
+}
+
+impl InputMounts {
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
 /// `attest capsule run`: execute `command` inside the capsule. The
 /// manifest is re-validated (digest pinning included). Returns the
 /// command's exit code; stdout/stderr are inherited.
@@ -279,7 +296,12 @@ pub fn run(workspace: &Path, name: &str, command: &[String]) -> Result<i32> {
         .canonicalize()
         .with_context(|| format!("cannot resolve workspace {}", workspace.display()))?;
     let status = Command::new(binary)
-        .args(run_args(&manifest, &workspace, &[], command))
+        .args(run_args(
+            &manifest,
+            &workspace,
+            &InputMounts::none(),
+            command,
+        ))
         .status()
         .with_context(|| format!("failed to execute {binary}"))?;
     Ok(status.code().unwrap_or(1))
@@ -290,7 +312,7 @@ pub fn run(workspace: &Path, name: &str, command: &[String]) -> Result<i32> {
 pub fn run_captured(
     manifest: &CapsuleManifest,
     workspace: &Path,
-    inputs: &[PathBuf],
+    inputs: &InputMounts,
     command: &[String],
 ) -> Result<std::process::Output> {
     let binary = runtime_binary()
@@ -328,7 +350,12 @@ mod tests {
     #[test]
     fn run_args_enforce_isolation() {
         let manifest = CapsuleManifest::new("demo", DIGEST_REF).expect("manifest");
-        let args = run_args(&manifest, Path::new("/ws"), &[], &["true".to_string()]);
+        let args = run_args(
+            &manifest,
+            Path::new("/ws"),
+            &InputMounts::none(),
+            &["true".to_string()],
+        );
         assert!(args.contains(&"--read-only".to_string()));
         let net = args.iter().position(|a| a == "--network").expect("network");
         assert_eq!(args[net + 1], "none");
@@ -342,7 +369,12 @@ mod tests {
     fn entrypoint_precedes_image_and_command() {
         let mut manifest = CapsuleManifest::new("demo", DIGEST_REF).expect("manifest");
         manifest.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string()]);
-        let args = run_args(&manifest, Path::new("/ws"), &[], &["echo hi".to_string()]);
+        let args = run_args(
+            &manifest,
+            Path::new("/ws"),
+            &InputMounts::none(),
+            &["echo hi".to_string()],
+        );
         let ep = args
             .iter()
             .position(|a| a == "--entrypoint")

@@ -286,11 +286,11 @@ mutate "sign holds the receipt to the verifier's checks" src/core.rs \
 assert s.count(old) == 1, "sign scrutiny moved"
 new = s.replace(old, "    if false {\n        eprintln!(\n            \"error: refusing to sign {}: {}\",")'
 
-mutate "PAX extensions do not slip past the entry limits" src/archive.rs \
-  archive_limits pax_extensions_and_long_names_are_refused \
-  'old = "        if entry.pax_extensions().map_err(surface_limit)?.is_some() {"
-assert s.count(old) == 1, "PAX check moved"
-new = s.replace(old, "        if entry.pax_extensions().map_err(surface_limit)?.is_some() && false {")'
+mutate "tar extension records are refused on the wire" src/archive.rs \
+  archive_limits gnu_long_link_records_are_refused_on_the_wire \
+  'old = "            if matches!(kind, b\x27L\x27 | b\x27K\x27 | b\x27x\x27 | b\x27g\x27) {"
+assert s.count(old) == 1, "physical extension check moved"
+new = s.replace(old, "            if false {")'
 
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \

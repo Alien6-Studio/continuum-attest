@@ -221,19 +221,29 @@ fn a_capsule_mounts_declared_inputs_read_only() {
         network: attest::capsule::CAPSULE_NETWORK_NONE.to_string(),
         capsule_hash: None,
     };
+    let snapshot = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(snapshot.path().join("src")).unwrap();
+    std::fs::write(snapshot.path().join("in.txt"), "frozen").unwrap();
     let args = attest::capsule::run_args(
         &manifest,
         dir.path(),
-        &["src".into(), "in.txt".into(), "missing".into()],
+        &attest::capsule::InputMounts {
+            root: snapshot.path().to_path_buf(),
+            paths: vec!["src".into(), "in.txt".into(), "missing".into()],
+        },
         &["true".to_string()],
     );
     let joined = args.join(" ");
+    // Mounted from the snapshot, at the input's own path inside the capsule.
     assert!(
-        joined.contains(&format!("{}/in.txt:/ws/in.txt:ro", dir.path().display())),
+        joined.contains(&format!(
+            "{}/in.txt:/ws/in.txt:ro",
+            snapshot.path().display()
+        )),
         "{joined}"
     );
     assert!(
-        joined.contains(&format!("{}/src:/ws/src:ro", dir.path().display())),
+        joined.contains(&format!("{}/src:/ws/src:ro", snapshot.path().display())),
         "{joined}"
     );
     assert!(

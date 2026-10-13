@@ -331,7 +331,7 @@ fn capsule_network_is_none() {
     let output = capsule::run_captured(
         &manifest,
         dir.path(),
-        &[],
+        &attest::capsule::InputMounts::none(),
         &[
             "sh".to_string(),
             "-c".to_string(),
@@ -360,7 +360,7 @@ fn capsule_env_is_declared_only() {
     let output = capsule::run_captured(
         &manifest,
         dir.path(),
-        &[],
+        &attest::capsule::InputMounts::none(),
         &[
             "sh".to_string(),
             "-c".to_string(),
@@ -394,7 +394,7 @@ fn capsule_runs_are_deterministic() {
         let output = capsule::run_captured(
             &manifest,
             dir.path(),
-            &[],
+            &attest::capsule::InputMounts::none(),
             &[
                 "sh".to_string(),
                 "-c".to_string(),
@@ -413,4 +413,76 @@ fn capsule_runs_are_deterministic() {
         );
     }
     assert_eq!(hashes[0], hashes[1], "output hash must be deterministic");
+}
+
+/// Issue #38, the capsule half: the step reads its declared inputs from a
+/// snapshot taken when they were hashed. A process on the host changes
+/// the input while the step runs and puts it back before the step ends;
+/// the step must have read the original, the run must pass, and the
+/// receipt must say the inputs were enforced.
+#[test]
+fn capsule_step_reads_a_frozen_copy_of_its_inputs() {
+    let Some(image) = pulled_busybox_ref() else {
+        eprintln!("skipping capsule_step_reads_a_frozen_copy_of_its_inputs: no container runtime");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    Command::cargo_bin("attest")
+        .unwrap()
+        .arg("init")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    capsule::init(dir.path(), "frozen", &image).expect("init");
+    std::fs::write(dir.path().join("in.txt"), "original\n").unwrap();
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        "version: \"1.0\"\nname: frozen\nsteps:\n  read:\n    run: \"sleep 3 && cat in.txt > out.txt\"\n    inputs: [\"in.txt\"]\n    outputs: [\"out.txt\"]\n    capsule: frozen\n    cache: false\n",
+    )
+    .unwrap();
+
+    // The host-side tamper: after the step has started, change the input,
+    // then restore it before the step's re-hash.
+    let input = dir.path().join("in.txt");
+    let tamper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let _ = std::fs::write(&input, "tampered\n");
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let _ = std::fs::write(&input, "original\n");
+    });
+    let run = Command::cargo_bin("attest")
+        .unwrap()
+        .arg("run")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    tamper.join().unwrap();
+    assert!(
+        run.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "original\n",
+        "the step must have read the snapshot, not the host file"
+    );
+    let receipt_path = std::fs::read_dir(dir.path().join(".attest/receipts"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "yaml"))
+        .unwrap();
+    let receipt: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(receipt_path).unwrap()).unwrap();
+    let inputs = receipt["isolation"]["controls"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "inputs")
+        .unwrap();
+    assert_eq!(inputs["status"], "enforced", "{inputs:?}");
+    let leftover = std::fs::read_dir(dir.path().join(".attest/snapshots"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(leftover, 0, "snapshot cleaned up");
 }

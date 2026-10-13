@@ -78,6 +78,100 @@ struct InputsHeld {
     guard_applied: bool,
 }
 
+/// A copy of a step's declared inputs, taken at hashing time and hashed
+/// again to prove it is the state the receipt describes. Lives under
+/// `.attest/snapshots/` so a container runtime can bind-mount it; removed
+/// when dropped.
+struct InputSnapshot {
+    root: std::path::PathBuf,
+}
+
+impl InputSnapshot {
+    fn take(
+        workspace: &std::path::Path,
+        step_name: &str,
+        step: &crate::pipeline::Step,
+        expected_input_hash: &str,
+    ) -> Result<Self> {
+        let root = workspace.join(".attest").join("snapshots").join(format!(
+            "{}-{}",
+            sanitize(step_name),
+            std::process::id()
+        ));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+        let snapshot = Self { root };
+        for input in &step.inputs {
+            let from = workspace.join(input);
+            let to = snapshot.root.join(input);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            copy_tree(&from, &to)
+                .with_context(|| format!("cannot snapshot input {}", input.display()))?;
+        }
+        let hashed =
+            crate::hashing::hash_inputs(&snapshot.root, step_name, &step.run, &step.inputs)?;
+        if hashed != expected_input_hash {
+            anyhow::bail!(
+                "step '{}': declared inputs changed between hashing and snapshot (hashed {}, \
+                 snapshot {}); the step did not run",
+                step_name,
+                expected_input_hash,
+                hashed
+            );
+        }
+        Ok(snapshot)
+    }
+}
+
+impl Drop for InputSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Copy a file, a directory tree or a symbolic link as it is: links stay
+/// links (never followed), modes are kept. Directory entries are copied in
+/// name order, so two snapshots of the same tree are built the same way.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(from)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, to)?;
+        #[cfg(not(unix))]
+        anyhow::bail!("symbolic links in snapshots need a Unix platform");
+        return Ok(());
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(to)?;
+        let mut entries: Vec<_> = std::fs::read_dir(from)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        std::fs::set_permissions(to, meta.permissions())?;
+        return Ok(());
+    }
+    std::fs::copy(from, to)?;
+    Ok(())
+}
+
 /// Declared inputs held unwritable while a step runs, restored afterwards.
 ///
 /// Permission bits, not a mount: every regular file and directory under a
@@ -420,7 +514,13 @@ impl<'a> Executor<'a> {
                     self.inputs_held.in_capsule += 1;
                 }
                 let execution_result = if let Some(manifest) = &capsule {
-                    Self::execute_step_in_capsule(manifest, step, &workspace)
+                    Self::execute_step_in_capsule(
+                        manifest,
+                        &step_name,
+                        step,
+                        &workspace,
+                        &input_hash,
+                    )
                 } else {
                     self.execute_step(&step_name, step, &env).await
                 };
@@ -541,8 +641,9 @@ impl<'a> Executor<'a> {
         } else if held.in_capsule == held.executed {
             (
                 crate::sandbox::ControlStatus::Enforced,
-                "declared inputs mounted read-only in the capsule for every step; the runtime \
-                 refuses writes to them"
+                "every step ran in a capsule with its declared inputs mounted read-only from a \
+                 snapshot taken at hashing time: the runtime refuses writes from inside, and a \
+                 change on the host during the step never reaches the step's view"
                     .to_string(),
             )
         } else if held.guard_applied {
@@ -713,11 +814,26 @@ impl<'a> Executor<'a> {
     /// process env is the manifest env + normalization set only.
     fn execute_step_in_capsule(
         manifest: &crate::capsule::CapsuleManifest,
+        step_name: &str,
         step: &crate::pipeline::Step,
         workspace: &std::path::Path,
+        input_hash: &str,
     ) -> Result<crate::sandbox::SandboxResult> {
         let command = vec!["sh".to_string(), "-c".to_string(), step.run.clone()];
-        let output = crate::capsule::run_captured(manifest, workspace, &step.inputs, &command)?;
+        // The step reads its declared inputs from a snapshot, not from the
+        // workspace: a copy taken now, hashed, and required to match the
+        // hash the receipt will carry. A process on the host can change the
+        // workspace while the step runs; it cannot change what the step
+        // sees, and if it changes the workspace between the hash and the
+        // copy, the mismatch refuses the step.
+        let snapshot = InputSnapshot::take(workspace, step_name, step, input_hash)?;
+        let mounts = crate::capsule::InputMounts {
+            root: snapshot.root.clone(),
+            paths: step.inputs.clone(),
+        };
+        let output = crate::capsule::run_captured(manifest, workspace, &mounts, &command);
+        drop(snapshot);
+        let output = output?;
         Ok(crate::sandbox::SandboxResult {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),

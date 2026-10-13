@@ -383,7 +383,7 @@ fn pax_extensions_and_long_names_are_refused() {
         &with_pax,
         &["--max-entry-bytes", "8192", "--max-entries", "3"],
         "operational",
-        "PAX extensions",
+        "tar extension record (type 'x')",
     );
 
     let long = format!("events/{}.json", "a".repeat(120));
@@ -400,6 +400,54 @@ fn pax_extensions_and_long_names_are_refused() {
         &with_long_name,
         &[],
         "operational",
-        "long-name extension",
+        "tar extension record (type 'L')",
+    );
+}
+
+/// Extension records are physical entries. A GNU long-link record of
+/// 32 KiB, followed by a regular entry, is three entries on the wire and
+/// 32 KiB of data the crate would read before showing anything; the
+/// physical scan refuses it before the per-entry limits are even reached.
+#[test]
+fn gnu_long_link_records_are_refused_on_the_wire() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_size(manifest().len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "manifest.json", &manifest()[..])
+            .unwrap();
+        // The 'K' record by hand: a GNU long-link entry whose data is the
+        // (absurdly long) link target for the entry that follows.
+        let payload = vec![b'/'; 32 * 1024];
+        let mut long = tar::Header::new_gnu();
+        long.set_entry_type(tar::EntryType::GNULongLink);
+        long.set_size(payload.len() as u64);
+        long.set_mode(0o644);
+        long.set_cksum();
+        builder.append(&long, &payload[..]).unwrap();
+        let mut header = tar::Header::new_ustar();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "receipt.yaml", &b"x"[..])
+            .unwrap();
+        let bytes = builder.into_inner().unwrap();
+        write(
+            tmp.path(),
+            "longlink.attest.tar.zst",
+            &zstd::encode_all(&bytes[..], 3).unwrap(),
+        )
+    };
+    refused(
+        tmp.path(),
+        &archive,
+        &["--max-entry-bytes", "8192", "--max-entries", "2"],
+        "operational",
+        "tar extension record",
     );
 }
