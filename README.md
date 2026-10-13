@@ -82,13 +82,16 @@ legitimate archive that needs more.
 
 `attest verify --format json RECEIPT` emits one NDJSON record per receipt file. The
 [verification result v1 schema](schemas/verification-result-v1.schema.json)
-defines its fields and five named checks (archive and interop results have
+defines its fields: five named checks, and the optional `policy`, `execution`
+and `trust_material` objects that 0.2 added (archive and interop results have
 separate contracts). Rust clients can load it from
 `attest::verify::VERDICT_JSON_SCHEMA`. Schema validity is structural, not
 permission to accept an artifact: a `pass` can include skipped checks or warnings.
 Consumers must bind the receipt and signer they expect and enforce their own
-required checks and warning policy. Operational errors use stderr and exit 2,
-not a fabricated JSON verification result.
+required checks and warning policy. An operational error is exit 2 and a line
+on stderr; in JSON mode it is also one record with `"verdict": "error"` and the
+error kind (`resource-limit` or `operational`), never a fabricated verification
+result.
 
 ## A pipeline
 
@@ -161,8 +164,9 @@ whose receipt does not describe it — which is the point.
 ## What it does not claim
 
 A receipt establishes **internal consistency**, verifiable by a third party
-against your source. Two properties are still missing, and we would rather
-say so here than let you discover them during an audit:
+against your source. Some properties are still missing, and several guarantees
+are narrower than their names suggest; we would rather say so here than let
+you discover it during an audit:
 
 - **The causal root is anchored, but never published.** The root is covered by
   the receipt's signature, and `--timestamp` puts an RFC 3161 authority over
@@ -200,17 +204,21 @@ say so here than let you discover them during an audit:
 - **"Isolated" is a list, not a word.** `--verify` runs steps under process
   isolation, which enforces memory and open-file limits and timeouts when they
   are configured, and nothing else: no network control, no filesystem control,
-  no capability drop. A container (`--container-image`) adds `--network none`
-  and declared-only environment; a strict container adds a seccomp profile,
-  dropped capabilities and a read-only root; a capsule has its own. Every
-  receipt carries an `isolation` block naming each control as enforced, not
-  enforced or not available on that platform, so a recipient reads what was
-  in force rather than inferring it from a mode's name.
-- **Revoking a key does not reach anyone else.** `attest keys revoke` writes to
-  your local trust store. A third party verifying your receipt reads their own
-  copy, and nothing tells them it is out of date — there is no distribution
-  mechanism and no notion of freshness. Revocation protects a verifier who
-  already has it; it does not travel on its own.
+  no capability drop. A capsule is the container path: `--network none`, a
+  read-only root, declared-only environment, declared inputs mounted
+  read-only. The library's container and strict-container modes (seccomp
+  profile, dropped capabilities) are not exposed on the command line in this
+  release. Every receipt carries an `isolation` block naming each control as
+  enforced, not enforced or not available on that platform, so a recipient
+  reads what was in force rather than inferring it from a mode's name.
+- **Revocation travels only as far as a bundle is carried.** `attest keys
+  revoke` writes to your local trust store; a recipient learns of it when
+  they import a bundle you issued afterwards. Nothing pushes that bundle to
+  them, and nothing fetches it: trust material moves as a file, by a channel
+  you both chose. What the verifier can say is how current its material is,
+  the bundle its revocations are known up to and whether that bundle has
+  expired, and it says so in every verdict. Revocation protects a verifier
+  who has refreshed; it does not reach one who has not.
 
 **Time is worth what `--timestamp` makes it worth.** Without it, a receipt's
 timestamp is written by the runner and covered by the runner's own signature,
@@ -291,7 +299,10 @@ published there too:
 - [Receipt format](https://attest.continuu.ms/en/docs/receipt-format/) — the receipt wire format, the `attest-manifest/v1`
   hashing rules, the canonical signing bytes and the trust store. Specified in
   enough detail to write an independent verifier without reading the Rust,
-  which is what "anyone can check it" has to mean.
+  which is what "anyone can check it" has to mean. The trust bundle format
+  and the receipt's `isolation` block are new in 0.2; until their pages are
+  published there, `src/trust.rs` and `src/sandbox/mod.rs` carry the
+  normative description, and `schemas/` the JSON contract.
 - [Plugin protocol](https://attest.continuu.ms/en/docs/plugin-protocol/) — the
   boundary a plugin may not cross. A specification, not a feature of this
   release: `attest` spawns nothing.
