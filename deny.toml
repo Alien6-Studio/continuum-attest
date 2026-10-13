@@ -12,15 +12,7 @@ all-features = true
 # purpose: an entry in `ignore` must come with a comment saying why, who
 # decided, and when it is revisited.
 yanked = "deny"
-ignore = [
-  # unsafe-libyaml is archived upstream; serde_yaml, which pulls it in, is
-  # deprecated by the same author. RustSec published the advisory on
-  # 2026-10-12. Receipts are YAML and their signatures cover the bytes
-  # serde_yaml writes, so the parser cannot be swapped as a bump: #59 owns
-  # the replacement and removes this entry. Decided by the maintainer when
-  # merging #58; revisited before 0.2 ships.
-  { id = "RUSTSEC-2024-0449", reason = "tracked in #59; replacing the YAML parser must keep signed bytes identical" },
-]
+ignore = []
 
 [licenses]
 # Permissive licences only, plus MPL-2.0 (file-level copyleft, which does

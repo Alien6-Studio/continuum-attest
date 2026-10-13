@@ -39,7 +39,14 @@ unwrap_used = "warn"
 # CLI & configuration
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
+# serde_yaml under its maintained fork. The author deprecated serde_yaml
+# and archived unsafe-libyaml, the C-to-Rust port it parses with
+# (RUSTSEC-2024-0449); serde_norway keeps both going under the same API,
+# so the crate is renamed here and the code keeps saying serde_yaml.
+# Receipt signatures cover the canonical JSON bytes, not the YAML, so the
+# parser can change without a signature changing; the fixtures under
+# tests/fixtures/receipts hold the parser to reading old receipts intact.
+serde_yaml = { package = "serde_norway", version = "0.9.42" }
 serde_json = "1.0"
 
 # Crypto & attestation

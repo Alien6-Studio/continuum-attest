@@ -70,7 +70,10 @@ same convention across every command, so CI can branch on them.
 Evidence is untrusted input, and its size is the sender's choice. An archive is
 refused before anything in it is parsed if it is over 64 MiB on disk, expands
 past 512 MiB, holds more than 10 000 entries or an entry over 64 MiB; a receipt
-or a DSSE envelope over 16 MiB is refused the same way. The refusal is exit
+or a DSSE envelope over 16 MiB is refused the same way, before the YAML or JSON
+parser sees a byte. Receipts are parsed with `serde_norway`, the maintained
+fork of `serde_yaml`; attest writes no anchors or aliases, and the size cap is
+what bounds a hostile document, not the parser. The refusal is exit
 `2`, not a verdict, and `--format json` reports it as `resource-limit` so a
 consumer can tell "too big to look at" from "looked at and wrong". The archive
 limits are flags on `attest verify` (`--max-archive-bytes`,

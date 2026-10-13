@@ -1,0 +1,795 @@
+schema_version: 3
+pipeline_hash: 20922a0d2acd2117c9b8d83e9df74f42cc3649a1db92b69d9df0e0f5f0b8a35f
+steps:
+- name: clippy
+  input_hash: 47a2147c383c7a47475d9b7c5776c74b239a5ff6cd7d98c1229b6737f1511b73
+  output_hash: 95aba9c3ec14d9c6acb31a2dd401aff1b5fb3a913a0dbd59ec602fc683a6732d
+  duration_secs: 5
+  exit_code: 0
+  cache_hit: false
+  stdout: ''
+  stderr: "\e[1m\e[92m    Checking\e[0m continuum-attest v0.1.0 (/work)\n\e[1m\e[92m    Finished\e[0m `dev` profile [unoptimized + debuginfo] target(s) in 5.56s\n"
+- name: format-check
+  input_hash: 69f9ab1c18cbd99281f060f87eb636438e908bbcadc4a46b8903c35b3affd975
+  output_hash: 95aba9c3ec14d9c6acb31a2dd401aff1b5fb3a913a0dbd59ec602fc683a6732d
+  duration_secs: 0
+  exit_code: 0
+  cache_hit: false
+  stdout: ''
+  stderr: ''
+- name: test
+  input_hash: 6414cddda36cd9b3f540ebedce2dee3f4e45264efecc1ef3f4aba620d0aaf989
+  output_hash: 95aba9c3ec14d9c6acb31a2dd401aff1b5fb3a913a0dbd59ec602fc683a6732d
+  duration_secs: 27
+  exit_code: 0
+  cache_hit: false
+  stdout: |2+
+
+    running 62 tests
+    test capsule::tests::entrypoint_precedes_image_and_command ... ok
+    test capsule::tests::hash_excludes_stored_hash_and_is_stable ... ok
+    test capsule::tests::run_args_enforce_isolation ... ok
+    test capsule::tests::tag_references_are_rejected ... ok
+    test crypto::image_signing::tests::digest_ref_accepted ... ok
+    test crypto::image_signing::tests::kms_uri_accepted_file_key_gated ... ok
+    test crypto::image_signing::tests::malformed_digest_rejected ... ok
+    test crypto::image_signing::tests::manifest_is_canonical ... ok
+    test crypto::image_signing::tests::revision_regex_enforced ... ok
+    test crypto::image_signing::tests::tag_ref_rejected_with_normative_message ... ok
+    test crypto::supply_chain::tests::provenance_missing_fails ... ok
+    test crypto::supply_chain::tests::provenance_v02_passes ... ok
+    test crypto::supply_chain::tests::revision_binding_matches ... ok
+    test crypto::supply_chain::tests::revision_binding_mismatch_names_both_revisions ... ok
+    test crypto::supply_chain::tests::revision_binding_missing_in_v1_fails ... ok
+    test crypto::supply_chain::tests::provenance_v1_passes_single_and_multi ... ok
+    test crypto::supply_chain::tests::sbom_null_fails_with_zero_documents ... ok
+    test crypto::supply_chain::tests::sbom_missing_creation_info_fails ... ok
+    test crypto::supply_chain::tests::sbom_multi_platform_passes ... ok
+    test crypto::supply_chain::tests::revision_binding_skipped_for_v02_only ... ok
+    test crypto::supply_chain::tests::sbom_missing_spdx_version_fails ... ok
+    test crypto::supply_chain::tests::verification_manifest_is_canonical ... ok
+    test crypto::supply_chain::tests::sbom_one_bad_platform_fails_the_set ... ok
+    test crypto::timestamp::adversarial::a_multibyte_time_inside_a_tlv_is_refused ... ok
+    test crypto::supply_chain::tests::sbom_wrong_spdxid_fails ... ok
+    test crypto::supply_chain::tests::sbom_packages_not_array_fails ... ok
+    test crypto::supply_chain::tests::sbom_single_platform_passes ... ok
+    test crypto::supply_chain::tests::provenance_v02_clause_violations_fail ... ok
+    test crypto::timestamp::adversarial::a_utctime_with_a_multibyte_character_is_refused ... ok
+    test crypto::timestamp::adversarial::an_oid_arc_wider_than_the_accumulator_is_refused ... ok
+    test crypto::timestamp::adversarial::an_ordinary_oid_still_decodes ... ok
+    test crypto::timestamp::tests::a_granted_response_without_a_token_is_an_error ... ok
+    test crypto::supply_chain::tests::verification_receipt_records_report_and_verdict ... ok
+    test crypto::timestamp::tests::a_refusal_is_reported_with_its_status ... ok
+    test crypto::timestamp::tests::a_token_that_is_not_signed_data_is_refused ... ok
+    test crypto::supply_chain::tests::provenance_v1_clause_violations_fail ... ok
+    test crypto::timestamp::tests::an_absurd_length_is_refused_rather_than_allocated ... ok
+    test crypto::timestamp::tests::granted_response_yields_the_token ... ok
+    test crypto::timestamp::tests::granted_with_mods_is_accepted ... ok
+    test crypto::timestamp::tests::request_matches_the_reference_encoding ... ok
+    test crypto::timestamp::tests::truncated_input_does_not_panic ... ok
+    test hashing::tests::large_file_streaming ... ignored, allocates a 100 MB file; run explicitly
+    test hashing::tests::deterministic_across_runs ... ok
+    test hashing::tests::missing_input_is_error ... ok
+    test hashing::tests::boundary_attack ... ok
+    test hashing::tests::missing_output_is_error ... ok
+    test hashing::tests::manifest_sorted_by_byte_order ... ok
+    test hashing::tests::empty_file_vs_absent ... ok
+    test hashing::tests::order_independent ... ok
+    test hashing::tests::run_command_participates_in_input_hash_only ... ok
+    test hashing::tests::rename_detected ... ok
+    test interop::tests::invocation_id_ignores_signature_fields ... ok
+    test hashing::tests::symlink_escape_rejected ... ok
+    test interop::tests::pae_matches_dsse_spec ... ok
+    test interop::tests::statement_mapping_is_deterministic_and_sorted ... ok
+    test hashing::tests::symlink_not_followed ... ok
+    test provenance::tests::repository_credentials_are_never_recorded ... ok
+    test storage::receipt_format::tests::altering_a_recorded_fact_still_breaks_the_signature ... ok
+    test storage::receipt_format::tests::attaching_a_token_leaves_the_signature_valid ... ok
+    test wrap::tests::sanitize_label_replaces_specials ... ok
+    test wrap::tests::tee_passes_small_output_through ... ok
+    test wrap::tests::tee_truncates_and_marks ... ok
+
+    test result: ok. 61 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+    running 0 tests
+
+    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 5 tests
+    test export_is_reproducible ... ok
+    test a_tampered_event_breaks_the_chain_root ... ok
+    test unresolved_chain_requires_allow_partial ... ok
+    test untrusted_key_fails_with_key_id ... ok
+    test export_then_offline_verify_on_other_machine ... ok
+
+    test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+
+    running 5 tests
+    test test_default_patterns_without_file ... ok
+    test test_directory_pattern_ignores_contents ... ok
+    test test_double_star_pattern ... ok
+    test test_extension_glob_matches_at_any_depth ... ok
+    test test_literal_name_and_negation ... ok
+
+    test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 1 test
+    test a_timestamp_token_defeats_a_backdated_receipt ... ignored, requires network access to a timestamp authority
+
+    test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 4 tests
+    test test_cache_key_missing_input_is_an_error ... ok
+    test test_cache_key_changes_when_input_removed ... ok
+    test test_cache_key_handles_binary_inputs ... ok
+    test test_cache_key_tracks_manifest_input_hash ... ok
+
+    test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 10 tests
+    test capsule_network_is_none ... ok
+    test capsule_env_is_declared_only ... ok
+    test capsule_runs_are_deterministic ... ok
+    test init_rejects_tag_reference_with_exit_2 ... ok
+    test run_without_command_exits_2 ... ok
+    test edited_manifest_fails_hash_check ... ok
+    test verify_recompute_fails_when_pipeline_drops_capsule ... ok
+    test verify_recompute_passes_with_matching_capsule ... ok
+    test verify_recompute_fails_after_capsule_tamper ... ok
+    test init_writes_manifest_and_hash_is_idempotent ... ok
+
+    test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+    running 2 tests
+    test a_run_records_one_event_per_step_and_a_chain_root ... ok
+    test the_chain_is_covered_by_the_signature ... ok
+
+    test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+    running 13 tests
+    test test_causal_chain_serialization ... ok
+    test test_causal_event_hash_consistency ... ok
+    test test_causal_query_creation_and_validation ... ok
+    test test_causal_query_with_complex_criteria ... ok
+    test test_circular_dependency_prevention ... ok
+    test test_complex_causal_dependencies ... ok
+    test test_empty_ledger_operations ... ok
+    test test_concurrent_event_recording ... ok
+    test test_event_metadata_handling ... ok
+    test test_failed_step_causality ... ok
+    test test_malformed_event_handling ... ok
+    test test_ledger_persistence_recovery ... ok
+    test test_large_causal_chain ... ok
+
+    test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 20 tests
+    test test_image_verify_nonexistent_image ... ignored, Requires working cosign setup
+    test test_run_command_basic ... ignored, Requires working setup
+    test test_run_command_with_both_flags ... ignored, Requires working setup
+    test test_run_command_with_sign_flag ... ignored, Requires working setup
+    test test_run_command_with_verify_flag ... ignored, Requires working setup
+    test test_cli_help_command ... ok
+    test test_causal_path_missing_args ... ok
+    test test_causal_path_help ... ok
+    test test_causal_stats_help ... ok
+    test test_cli_quiet_flag ... ok
+    test test_cli_version_command ... ok
+    test test_causal_events_help ... ok
+    test test_cli_verbose_flag ... ok
+    test test_causal_chain_help ... ok
+    test test_image_verify_missing_arg ... ok
+    test test_image_config_help ... ok
+    test test_invalid_command ... ok
+    test test_run_command_help ... ok
+    test test_image_verify_help ... ok
+    test test_init_command_basic ... ok
+
+    test result: ok. 15 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+    running 13 tests
+    test run_without_init_exits_two ... ok
+    test init_is_idempotent ... ok
+    test invalid_pipeline_exits_two ... ok
+    test failing_step_reports_name_exit_code_and_output ... ok
+    test failing_step_exits_one_with_receipt ... ok
+    test run_executes_and_writes_receipt ... ok
+    test dependent_of_failed_step_is_skipped ... ok
+    test missing_declared_input_exits_one ... ok
+    test run_sign_produces_signed_receipt ... ok
+    test failed_step_result_is_not_cached ... ok
+    test cache_flag_controls_step_caching ... ok
+    test pipeline_schema_version_is_enforced ... ok
+    test step_timeout_is_enforced ... ok
+
+    test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+
+
+    running 1 test
+    test tests::test_core_compilation ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 23 tests
+    test test_all_hash_algorithms ... ok
+    test test_all_compliance_frameworks ... ok
+    test test_attest_core_mode_transitions ... ok
+    test test_attest_core_run_pipeline_default_path ... ok
+    test test_attest_core_with_invalid_mode_config ... ok
+    test test_attest_core_set_invalid_mode_config ... ok
+    test test_attest_core_run_pipeline_custom_path ... ok
+    test test_crypto_config_edge_cases ... ok
+    test test_attest_core_run_pipeline_all_modes ... ok
+    test test_mode_config_edge_cases ... ok
+    test test_mode_config_validation_formal_proof_violations ... ok
+    test test_attest_core_init ... ok
+    test test_mode_config_validation_hardware_security_without_signatures ... ok
+    test test_mode_config_validation_light_mode_violations ... ok
+    test test_mode_config_validation_verifiable_mode_violations ... ok
+    test test_mode_config_validation_zero_parallel_steps ... ok
+    test test_mode_config_with_overrides_audit_settings ... ok
+    test test_mode_config_with_overrides_crypto_settings ... ok
+    test test_mode_config_with_overrides_invalid_values ... ok
+    test test_mode_config_with_overrides_isolation_settings ... ok
+    test test_mode_config_with_overrides_performance_settings ... ok
+    test test_mode_config_with_overrides_unknown_key ... ok
+    test test_operation_mode_coverage ... ok
+
+    test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 6 tests
+    test test_concurrent_pipeline_loading ... ok
+    test test_full_pipeline_execution ... ok
+    test test_error_handling_and_recovery ... ok
+    test test_mode_lifecycle ... ok
+    test test_pipeline_validation_edge_cases ... ok
+    test test_verification_workflow ... ok
+
+    test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 9 tests
+    test test_signature_format_validation ... ok
+    test test_key_file_corruption_handling ... ok
+    test test_multiple_keypairs_isolation ... ok
+    test test_signature_integrity_and_tampering ... ok
+    test test_large_message_signing ... ok
+    test test_key_generation_entropy ... ok
+    test test_end_to_end_signing_workflow ... ok
+    test test_key_persistence_and_security ... ok
+    test test_concurrent_signing_operations ... ok
+
+    test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+    running 11 tests
+    test test_dag_build_and_basic_analysis ... ok
+    test test_cycle_path_building ... ok
+    test test_complex_dag_structure ... ok
+    test test_diamond_dependency_pattern ... ok
+    test test_dependencies_and_dependents ... ok
+    test test_isolated_components ... ok
+    test test_node_depths ... ok
+    test test_self_loop_cycle ... ok
+    test test_toplogical_sort_complex ... ok
+    test test_wide_parallel_pipeline ... ok
+    test test_large_dag_performance ... ok
+
+    test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 9 tests
+    test test_attest_init_command ... ok
+    test test_attest_image_verify_help ... ok
+    test test_attest_causal_path_nonexistent_events_fails_gracefully ... ok
+    test test_attest_run_command_without_pipeline_file ... ok
+    test test_attest_image_config_command ... ok
+    test test_attest_concurrent_help_invocations ... ok
+    test test_attest_invalid_subcommand_fails ... ok
+    test test_attest_causal_stats_and_events ... ok
+    test test_attest_help_and_version ... ok
+
+    test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+    running 13 tests
+    test test_container_execution_mode ... ok
+    test test_working_dir_missing_fails ... ok
+    test test_working_dir_execution ... ok
+    test test_executor_creation_and_basic_execution ... ok
+    test test_default_receipt_keeps_wall_clock_timestamp ... ok
+    test test_environment_variable_handling ... ok
+    test test_operation_modes ... ok
+    test test_hermetic_receipt_uses_source_date_epoch ... ok
+    test test_error_handling ... ok
+    test test_isolated_execution_mode ... ok
+    test test_cache_behavior ... ok
+    test test_executor_configuration_validation ... ok
+    test test_parallel_execution ... ok
+
+    test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+
+    running 6 tests
+    test test_deadlock_prevention ... ok
+    test test_cache_contention ... ok
+    test test_performance_under_memory_pressure ... ok
+    test test_mixed_workload_concurrency ... ok
+    test test_high_concurrency_execution ... ok
+    test test_resource_exhaustion_recovery ... ok
+
+    test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.91s
+
+
+    running 14 tests
+    test test_container_execution_mode ... ok
+    test test_isolated_execution_mode ... ok
+    test test_environment_variable_handling ... ok
+    test test_error_handling ... ok
+    test test_resource_constraints ... ok
+    test test_executor_creation_and_basic_execution ... ok
+    test test_cache_behavior ... ok
+    test test_operation_modes ... ok
+    test test_concurrent_execution ... ok
+    test test_executor_configuration_validation ... ok
+    test test_parallel_execution ... ok
+    test test_memory_and_resource_cleanup ... ok
+    test test_timeout_handling ... ok
+    test test_large_pipeline_performance ... ok
+
+    test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.63s
+
+
+    running 4 tests
+    test test_features_integration_summary ... ok
+    test test_core_methods_exist ... ok
+    test test_pipeline_functionality ... ok
+    test test_storage_functionality ... ok
+
+    test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 1 test
+    test receipt_hashes_are_recomputable ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+    running 8 tests
+    test tag_reference_exits_two_without_calling_cosign ... ok
+    test old_cosign_is_refused ... ok
+    test clean_paths_scope_the_dirty_check ... ok
+    test sign_invokes_cosign_with_normative_argv ... ok
+    test extra_annotations_are_sorted_into_argv ... ok
+    test dirty_tree_exits_one_naming_paths ... ok
+    test file_key_requires_escape_hatch ... ok
+    test signed_receipt_passes_attest_verify ... ok
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+
+    running 8 tests
+    test malformed_expected_revision_exits_two ... ok
+    test tag_ref_with_require_sbom_exits_two ... ok
+    test file_key_skips_kms_export ... ok
+    test empty_kms_export_exits_two ... ok
+    test broken_sbom_fails_check ... ok
+    test revision_mismatch_exits_one_naming_both ... ok
+    test full_verification_records_exact_argv ... ok
+    test signed_verification_receipt_passes_attest_verify ... ok
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+    running 0 tests
+
+    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 7 tests
+    test regenerate_fixtures ... ignored
+    test exported_statement_validates_against_slsa_schema ... ok
+    test tampered_payload_fails_import ... ok
+    test export_matches_golden_file ... ok
+    test unsigned_receipt_requires_allow_unsigned ... ok
+    test round_trip_export_import_passes ... ok
+    test import_fails_for_untrusted_key ... ok
+
+    test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+    running 6 tests
+    test generate_creates_key_with_derived_id ... ok
+    test export_never_emits_private_material ... ok
+    test same_name_twice_yields_distinct_ids ... ok
+    test import_is_idempotent ... ok
+    test export_import_round_trip_verifies ... ok
+    test revocation_semantics ... ok
+
+    test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+
+
+    running 41 tests
+    test test_causal_chain_command_help ... ok
+    test test_causal_events_command_help ... ok
+    test test_causal_command_help ... ok
+    test test_causal_path_command_help ... ok
+    test test_causal_stats_command_help ... ok
+    test test_all_image_subcommands ... ok
+    test test_causal_chain_empty_events ... ok
+    test test_cli_help ... ok
+    test test_cli_quiet_flag ... ok
+    test test_causal_events_command ... ok
+    test test_cli_verbose_flag ... ok
+    test test_causal_chain_with_save ... ok
+    test test_causal_path_command ... ok
+    test test_causal_chain_with_events ... ok
+    test test_image_verify_command ... ok
+    test test_cli_version ... ok
+    test test_causal_events_with_limit ... ok
+    test test_causal_events_with_step_filter ... ok
+    test test_causal_path_detailed ... ok
+    test test_image_verify_command_detailed ... ok
+    test test_causal_stats_command ... ok
+    test test_image_command_help ... ok
+    test test_complex_command_combinations ... ok
+    test test_image_config_show ... ok
+    test test_all_causal_subcommands ... ok
+    test test_image_verify_command_help ... ok
+    test test_image_config_command_help ... ok
+    test test_image_config_show_and_test ... ok
+    test test_image_config_test_cosign ... ok
+    test test_causal_stats_detailed ... ok
+    test test_invalid_command ... ok
+    test test_init_command_in_temp_dir ... ok
+    test test_init_command_help ... ok
+    test test_run_command_help ... ok
+    test test_global_flags_work_with_subcommands ... ok
+    test test_run_without_init ... ok
+    test causal_events_lists_real_events ... ok
+    test test_logging_levels_setup ... ok
+    test test_run_command_with_pipeline_flag ... ok
+    test test_run_command_with_flags ... ok
+    test test_run_command_flag_combinations ... ok
+
+    test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+
+    running 13 tests
+    test test_compliance_framework_assignment ... ok
+    test test_formal_proof_mode_config ... ok
+    test test_from_mode ... ok
+    test test_hash_algorithm_consistency ... ok
+    test test_light_mode_config ... ok
+    test test_mode_config_overrides ... ok
+    test test_mode_config_validation ... ok
+    test test_operation_mode_display ... ok
+    test test_operation_mode_parsing ... ok
+    test test_performance_impact ... ok
+    test test_serialization_deserialization ... ok
+    test test_use_case_suitability ... ok
+    test test_verifiable_mode_config ... ok
+
+    test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 3 tests
+    test the_shipped_sample_parses ... ok
+    test the_projects_own_pipeline_parses ... ok
+    test steps_that_resolve_dependencies_declare_the_lockfile ... ok
+
+    test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 3 tests
+    test stress_tests::stress_test_concurrent_crypto_operations ... ok
+    test stress_tests::stress_test_large_pipeline ... ok
+    test stress_tests::stress_test_many_receipts ... ok
+
+    test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+
+    running 7 tests
+    test test_attestation_configuration ... ok
+    test test_environment_variable_handling ... ok
+    test test_complete_pipeline_workflow ... ok
+    test test_malformed_yaml_handling ... ok
+    test test_pipeline_validation_comprehensive ... ok
+    test test_step_validation_edge_cases ... ok
+    test test_large_pipeline_performance ... ok
+
+    test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 18 tests
+    test test_comprehensive_validation_success ... ok
+    test test_cycle_detection_complex ... ok
+    test test_cycle_detection_simple ... ok
+    test test_attestation_validation ... ok
+    test test_dag_analysis ... ok
+    test test_dag_dependencies_and_dependents ... ok
+    test test_excessive_dependencies_warning ... ok
+    test test_linear_pipeline_detection ... ok
+    test test_deep_pipeline_warning ... ok
+    test test_misspelled_step_key_is_rejected ... ok
+    test test_performance_validation ... ok
+    test test_security_validation ... ok
+    test test_self_dependency ... ok
+    test test_topological_sort ... ok
+    test test_unknown_dependency ... ok
+    test test_unknown_top_level_key_is_rejected ... ok
+    test test_validation_error_structure ... ok
+    test test_validation_warnings ... ok
+
+    test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 1 test
+    test run_binds_git_artifacts_and_provenance_to_signature ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+
+
+    running 2 tests
+    test test_identical_receipts_get_distinct_files ... ok
+    test test_save_receipt_never_collides ... ok
+
+    test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+    running 5 tests
+    test source_date_epoch_is_normalized ... ok
+    test path_leak_is_detected ... ok
+    test deterministic_pipeline_verifies ... ok
+    test nondeterministic_step_diverges ... ok
+    test cache_is_bypassed ... ok
+
+    test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+    running 18 tests
+    test test_container_runtime_variants ... ok
+    test test_filesystem_policy_customization ... ok
+    test test_filesystem_policy_defaults ... ok
+    test test_filesystem_policy_serialization_roundtrip ... ok
+    test test_filesystem_security_manager_allows_configured_paths ... ok
+    test test_filesystem_security_manager_custom_policy ... ok
+    test test_filesystem_security_manager_denies_unlisted_paths ... ok
+    test test_filesystem_security_manager_tracks_violations ... ok
+    test test_filesystem_security_policy_default ... ok
+    test test_isolation_level_variants ... ok
+    test test_network_policy_variants ... ok
+    test test_resource_limits_configuration ... ok
+    test test_sandbox_config_customization ... ok
+    test test_sandbox_config_default_values ... ok
+    test test_sandbox_config_serialization_roundtrip ... ok
+    test test_sandbox_container_config ... ok
+    test test_sandbox_with_custom_resource_limits ... ok
+    test test_sandbox_creation_with_different_isolation_levels ... ok
+
+    test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 21 tests
+    test an_ordinary_tree_still_hashes_to_its_documented_manifest ... ok
+    test forging_a_collision_between_two_different_trees_is_refused ... ok
+    test forging_a_manifest_entry_through_a_newline_in_a_filename_is_refused ... ok
+    test a_certificate_not_authorised_to_timestamp_is_recognised_as_such ... ok
+    test forging_a_path_with_any_control_character_is_refused ... ok
+    test forging_a_recorded_fact_inside_a_causal_event_is_refused ... ok
+    test forging_a_result_by_changing_where_a_step_runs_is_refused ... ok
+    test forging_an_event_signature_and_deleting_its_key_is_refused ... ok
+    test the_signature_covers_the_causal_root_and_the_events ... ok
+    test forging_the_causal_graph_by_rewriting_parents_is_refused ... ok
+    test forging_provenance_by_mutating_an_input_mid_step_is_refused ... ok
+    test forging_a_different_environment_is_refused ... ok
+    test forging_an_attestation_of_a_deleted_artifact_through_the_cache_is_refused ... ok
+    test forging_a_result_by_running_the_same_step_elsewhere_is_refused ... ok
+    test forging_an_artifact_after_the_build_is_refused ... ok
+    test forging_a_matching_command_hash_by_shifting_argument_boundaries_is_refused ... ok
+    test forging_a_causal_event_inside_an_archive_is_refused ... ok
+    test forging_a_smaller_build_by_stripping_a_step_from_the_receipt_is_refused ... ok
+    test forging_an_event_signature_inside_an_archive_is_refused ... ok
+    test forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_refused ... ok
+    test a_pipeline_hash_is_the_same_in_every_process ... ok
+
+    test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+
+    running 16 tests
+    test test_disk_usage_tracking ... ok
+    test test_filesystem_security_manager ... ok
+    test test_enhanced_container_sandbox_creation ... ok
+    test test_filesystem_security_policy ... ok
+    test test_forbidden_extensions ... ok
+    test test_mount_restrictions ... ok
+    test test_path_traversal_detection ... ok
+    test test_rule_priority_system ... ok
+    test test_sandbox_security_integration ... ok
+    test test_seccomp_container_profile_generation ... ok
+    test test_seccomp_profiles ... ok
+    test test_security_levels ... ok
+    test test_security_policy_serialization ... ok
+    test test_security_report_generation ... ok
+    test test_strict_filesystem_policy ... ok
+    test test_violation_detector ... ok
+
+    test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 9 tests
+    test test_content_hashing_consistency ... ok
+    test test_complete_storage_workflow ... ok
+    test test_storage_error_handling ... ok
+    test test_file_hashing_comprehensive ... ok
+    test test_directory_hashing_with_ignore ... ok
+    test test_cache_operations_comprehensive ... ok
+    test test_receipt_management_lifecycle ... ok
+    test test_concurrent_storage_operations ... ok
+    test test_large_scale_storage_performance ... ok
+
+    test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+
+    running 2 tests
+    test arbitrary_bytes_never_panic ... ignored, fuzz harness; run explicitly
+    test mutations_never_panic_and_never_assert_a_false_imprint ... ignored, fuzz harness; run explicitly
+
+    test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 11 tests
+    test a_token_for_other_data_is_refused ... ok
+    test the_policy_oid_is_digicerts ... ok
+    test the_serial_is_carried_whole ... ok
+    test a_token_for_other_data_fails_before_any_signature_work ... ok
+    test a_real_token_yields_the_time_the_authority_stated ... ok
+    test no_truncation_of_a_real_token_panics ... ok
+    test no_pinned_issuer_means_no_trust ... ok
+    test a_certificate_that_did_not_issue_the_signer_is_refused ... ok
+    test a_real_token_verifies_against_its_pinned_issuer ... ok
+    test no_single_byte_corruption_panics ... ok
+    test no_corruption_can_change_what_the_verifier_asserts ... ok
+
+    test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.81s
+
+
+    running 1 test
+    test digicert_grants_a_token_for_our_hand_rolled_request ... ignored, requires network access to a timestamp authority
+
+    test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+    running 8 tests
+    test a_receipt_with_no_token_reports_skipped_rather_than_passed ... ok
+    test a_token_with_no_pinned_authority_at_all_is_refused ... ok
+    test a_token_that_is_not_base64_is_refused ... ok
+    test a_token_lifted_onto_a_different_signature_is_refused ... ok
+    test a_token_from_an_unpinned_authority_is_refused ... ok
+    test a_token_with_no_signature_to_cover_is_refused ... ok
+    test the_authentic_token_is_accepted_and_reports_the_stated_time ... ok
+    test no_truncation_of_a_real_token_ever_verifies ... ok
+
+    test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+    running 11 tests
+    test nonexistent_file_exits_two ... ok
+    test fresh_receipt_carries_schema_version ... ok
+    test future_schema_version_is_rejected ... ok
+    test consistency_failure_exits_one ... ok
+    test pre_versioning_receipt_still_verifies ... ok
+    test flipped_signature_byte_fails ... ok
+    test json_format_parses ... ok
+    test signed_receipt_verifies ... ok
+    test edited_output_hash_fails ... ok
+    test offline_verification_passes ... ok
+    test recompute_detects_workspace_drift ... ok
+
+    test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+    running 7 tests
+    test wrap_missing_output_fails_attestation ... ok
+    test wrap_failed_command_keeps_exit_code_over_attestation ... ok
+    test wrap_without_inputs_warns ... ok
+    test wrap_records_manifest_hashes ... ok
+    test wrap_propagates_wrapped_exit_code ... ok
+    test wrap_flag_validation ... ok
+    test wrap_sign_produces_verifiable_signature ... ok
+
+    test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+    running 0 tests
+
+    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr: "\e[1m\e[92m    Finished\e[0m `test` profile [optimized + debuginfo] target(s) in 0.43s\n\e[1m\e[92m     Running\e[0m unittests src/lib.rs (target/debug/deps/attest-e6cf66933ebe9e22)\n\e[1m\e[92m     Running\e[0m unittests src/main.rs (target/debug/deps/attest-6e89192c55510bba)\n\e[1m\e[92m     Running\e[0m tests/archive_roundtrip.rs (target/debug/deps/archive_roundtrip-2252d2ee935f42e0)\n\e[1m\e[92m     Running\e[0m tests/attestignore.rs (target/debug/deps/attestignore-12a5d6c6f459fd02)\n\e[1m\e[92m     Running\e[0m tests/backdating_defence.rs (target/debug/deps/backdating_defence-e225d95b1d93fbab)\n\e[1m\e[92m     Running\e[0m tests/cache_key.rs (target/debug/deps/cache_key-b89529515f3344a1)\n\e[1m\e[92m     Running\e[0m tests/capsule.rs (target/debug/deps/capsule-e5a30d8a4dd68cfa)\n\e[1m\e[92m     Running\e[0m tests/causal_chain.rs (target/debug/deps/causal_chain-28765dac5c3ba9dd)\n\e[1m\e[92m     Running\e[0m tests/causal_ledger_advanced_tests.rs (target/debug/deps/causal_ledger_advanced_tests-b3c386643f1b10cf)\n\e[1m\e[92m     Running\e[0m tests/cli_integration_tests.rs (target/debug/deps/cli_integration_tests-499a563710587e3f)\n\e[1m\e[92m     Running\e[0m tests/cli_run.rs (target/debug/deps/cli_run-ac0a6e05773959c6)\n\e[1m\e[92m     Running\e[0m tests/compilation_test.rs (target/debug/deps/compilation_test-d7f9ff990370973e)\n\e[1m\e[92m     Running\e[0m tests/core_extended_tests.rs (target/debug/deps/core_extended_tests-0448cb9315b876a2)\n\e[1m\e[92m     Running\e[0m tests/core_integration.rs (target/debug/deps/core_integration-dda372b34121c91b)\n\e[1m\e[92m     Running\e[0m tests/crypto_integration.rs (target/debug/deps/crypto_integration-31fc06525a3b0928)\n\e[1m\e[92m     Running\e[0m tests/dag_analysis_tests.rs (target/debug/deps/dag_analysis_tests-39b6c75b1eb5897a)\n\e[1m\e[92m     Running\e[0m tests/end_to_end.rs (target/debug/deps/end_to_end-4e4e0a5b7ca386c6)\n\e[1m\e[92m     Running\e[0m tests/executor_basic_tests.rs (target/debug/deps/executor_basic_tests-de300e3a4018e66f)\n\e[1m\e[92m     Running\e[0m tests/executor_concurrency_tests.rs (target/debug/deps/executor_concurrency_tests-b49549f7fe5b413c)\n\e[1m\e[92m     Running\e[0m tests/executor_unit_tests.rs (target/debug/deps/executor_unit_tests-bb0291cd365bc5ab)\n\e[1m\e[92m     Running\e[0m tests/features_validation.rs (target/debug/deps/features_validation-acf6cbdaa396d613)\n\e[1m\e[92m     Running\e[0m tests/hashing_recompute.rs (target/debug/deps/hashing_recompute-5e006232cf379f82)\n\e[1m\e[92m     Running\e[0m tests/image_sign_cli.rs (target/debug/deps/image_sign_cli-3673f27aa9f1f033)\n\e[1m\e[92m     Running\e[0m tests/image_verify_cli.rs (target/debug/deps/image_verify_cli-64bbd52ec00e414c)\n\e[1m\e[92m     Running\e[0m tests/integration_test.rs (target/debug/deps/integration_test-01513ac08e8d000a)\n\e[1m\e[92m     Running\e[0m tests/interop_cli.rs (target/debug/deps/interop_cli-42f8873873644590)\n\e[1m\e[92m     Running\e[0m tests/keys_cli.rs (target/debug/deps/keys_cli-6cbe8b8a33b443be)\n\e[1m\e[92m     Running\e[0m tests/main_integration.rs (target/debug/deps/main_integration-965d97e645a4e5e5)\n\e[1m\e[92m     Running\e[0m tests/operation_modes_test.rs (target/debug/deps/operation_modes_test-4f8978fb3c0ac7ce)\n\e[1m\e[92m     Running\e[0m tests/own_pipeline.rs (target/debug/deps/own_pipeline-e5ff2d3163aefb45)\n\e[1m\e[92m     Running\e[0m tests/performance_tests.rs (target/debug/deps/performance_tests-de809ad1f800f343)\n\e[1m\e[92m     Running\e[0m tests/pipeline_integration.rs (target/debug/deps/pipeline_integration-70c974d775e3f5cb)\n\e[1m\e[92m     Running\e[0m tests/pipeline_validation_tests.rs (target/debug/deps/pipeline_validation_tests-3580b1451066b7a0)\n\e[1m\e[92m     Running\e[0m tests/provenance.rs (target/debug/deps/provenance-80a7aee8dca2a195)\n\e[1m\e[92m     Running\e[0m tests/receipt_filenames.rs (target/debug/deps/receipt_filenames-ad6e3133a07b9afb)\n\e[1m\e[92m     Running\e[0m tests/reproducibility.rs (target/debug/deps/reproducibility-dd7b2d482a9d5aea)\n\e[1m\e[92m     Running\e[0m tests/sandbox_security_tests.rs (target/debug/deps/sandbox_security_tests-dbb18b767871dc78)\n\e[1m\e[92m     Running\e[0m tests/security_invariants.rs (target/debug/deps/security_invariants-1836718b1f432612)\n\e[1m\e[92m     Running\e[0m tests/security_test.rs (target/debug/deps/security_test-3cbb6636237bb8b3)\n\e[1m\e[92m     Running\e[0m tests/storage_integration.rs (target/debug/deps/storage_integration-61a3c28abe141687)\n\e[1m\e[92m     Running\e[0m tests/timestamp_fuzz.rs (target/debug/deps/timestamp_fuzz-8913ce43b6a46908)\n\e[1m\e[92m     Running\e[0m tests/timestamp_parse.rs (target/debug/deps/timestamp_parse-d1395d300973bf9f)\n\e[1m\e[92m     Running\e[0m tests/timestamp_tsa.rs (target/debug/deps/timestamp_tsa-86e8633fd7e6d1e7)\n\e[1m\e[92m     Running\e[0m tests/verify_adversarial.rs (target/debug/deps/verify_adversarial-034b1c4a30cebe61)\n\e[1m\e[92m     Running\e[0m tests/verify_cli.rs (target/debug/deps/verify_cli-e2340c5baeab0a7a)\n\e[1m\e[92m     Running\e[0m tests/wrap_cli.rs (target/debug/deps/wrap_cli-77d5e9cd0da23351)\n\e[1m\e[92m   Doc-tests\e[0m attest\n"
+- name: build-release
+  input_hash: 9a186f070236518890bc405bd340108e2fa91cd32b56c2c847cb22716d29d81a
+  output_hash: 3fdfca4d79c20bb24bda4a8c2e74cbb7b120122f33427861dbca6ce94ab1e0c6
+  duration_secs: 0
+  exit_code: 0
+  cache_hit: false
+  stdout: ''
+  stderr: "\e[1m\e[92m    Finished\e[0m `release` profile [optimized] target(s) in 0.24s\n"
+timestamp: 2026-09-17T09:10:27.091237918Z
+total_duration_secs: 34
+signature: cc875e2ef5e259617dd7fd0f94770e48a3f24c5d422f594c6d9c11e51ebd1d064bd81d12fd7123a96e69c8c68f65f35bf8bd2414b20a8fe64d1ff3dfb5acfc06
+signer_public_key: d5daff5527b274a1e7812a35ab46b4c6871c5c00bc0335091f18ea0f99ecaf81
+attest_version: 0.1.0
+causal_events:
+- a3a930d8e5728bb24e9b4d7e4e9e50b03fc12ebb690de87d695dd6a96c6f547b
+- a1beaf0d8fa6592e51557445bef47953a94a14a1f89e773bc22047d3302ef040
+- 72a0a36729424d0bfc9ac44f3ad8f9b55afc9325746c43d55428b00f2297b416
+- 40eaf2273ac053c321d0d0ef34ee8cc2a579281724a5655dbd736ec3b31c4d43
+causal_chain_hash: b2aa86aab9cf2c7708a61efe3a2c4f331b9f7b757a291165ef5cc16de2f129fa
+provenance:
+  invocation_id: de22c3ce-e954-4b73-a957-0158906274d6
+  started_at: 2026-09-17T09:09:52.752928557Z
+  pipeline_name: attest-ci
+  source:
+    repository: https://gitlab.alien6.local/continuum-ms/continuum-attest.git
+    commit: f4087f207696f4739cb3c4f0dbf902841bef93f8
+    branch: main
+    tracked_dirty: true
+  runner_os: linux
+  runner_arch: x86_64
+  ci: null
+  steps:
+  - name: build-release
+    needs:
+    - test
+    command_hash: eb8689187c98fcd962baafe0a7ea4927fbaa4b9d15e7e2ef515dfcb5d3ff9018
+    inputs:
+    - src/
+    - Cargo.toml
+    - Cargo.lock
+    outputs:
+    - target/release/attest
+  - name: clippy
+    needs: []
+    command_hash: 67e177cb9820bc848fbaee1d1410fc4dbaf8226bcc5dea4b64dc59bc2dcdf599
+    inputs:
+    - src/
+    - Cargo.toml
+    - Cargo.lock
+    outputs: []
+  - name: format-check
+    needs: []
+    command_hash: 90b431533a7e9d54cf580a3a593928de6ce6b86bd36a8fc711fc8921aaa6f702
+    inputs:
+    - src/
+    - tests/
+    - Cargo.toml
+    outputs: []
+  - name: test
+    needs:
+    - format-check
+    - clippy
+    command_hash: 55ddf5e341ebd4ed2ba7c5d3f3c7fb735f9f4bddce40eafab6650ddf5b2d5c70
+    inputs:
+    - src/
+    - tests/
+    - Cargo.toml
+    - Cargo.lock
+    outputs: []
+  artifacts:
+  - step: build-release
+    path: target/release/attest
+    kind: file
+    digest: cf4cd53f5009207924958397e429a21a564925f0bf1d128a8b2b7c35528ee7f9
+    algorithm: blake3
