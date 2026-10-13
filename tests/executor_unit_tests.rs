@@ -295,6 +295,7 @@ async fn test_isolated_execution_mode() -> Result<()> {
             container_config: None,
             seccomp_profile: Some("minimal".to_string()),
             security_level: attest::sandbox::SecurityLevel::Minimal,
+            inherit_environment: true,
         }),
         ..ExecutorConfig::default()
     };
@@ -696,6 +697,7 @@ async fn test_resource_constraints() -> Result<()> {
             container_config: None,
             seccomp_profile: Some("minimal".to_string()),
             security_level: attest::sandbox::SecurityLevel::Minimal,
+            inherit_environment: true,
         }),
         ..ExecutorConfig::default()
     };

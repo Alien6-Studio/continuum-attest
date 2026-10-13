@@ -64,10 +64,18 @@ pub struct Executor<'a> {
     /// the process that holds the key, so the key is not held while steps
     /// run.
     key_loader: Option<KeyLoader>,
-    /// Whether every executed step had its declared inputs made read-only
-    /// for its duration: `None` until a step runs, `Some(false)` when the
-    /// platform or the user (root) cannot be bound by permission bits.
-    inputs_guarded: Option<bool>,
+    /// How the executed steps' declared inputs were held: how many steps
+    /// ran, how many of those in a capsule (read-only mounts, enforced by
+    /// the runtime), and whether the permission-bit guard could be applied
+    /// at all (not as root, not without permission bits).
+    inputs_held: InputsHeld,
+}
+
+#[derive(Default)]
+struct InputsHeld {
+    executed: usize,
+    in_capsule: usize,
+    guard_applied: bool,
 }
 
 /// Declared inputs held unwritable while a step runs, restored afterwards.
@@ -177,10 +185,13 @@ impl<'a> Executor<'a> {
     ) -> Result<Self> {
         // Create sandbox if isolation is enabled
         let sandbox = if config.isolated {
-            let sandbox_config = config
+            let mut sandbox_config = config
                 .sandbox_config
                 .clone()
                 .unwrap_or_else(|| Self::create_default_sandbox_config(&config));
+            if config.hermetic_env {
+                sandbox_config.inherit_environment = false;
+            }
             Some(Sandbox::new(sandbox_config)?)
         } else {
             None
@@ -192,7 +203,7 @@ impl<'a> Executor<'a> {
             sandbox,
             mode_config,
             key_loader: None,
-            inputs_guarded: None,
+            inputs_held: InputsHeld::default(),
         })
     }
 
@@ -235,6 +246,7 @@ impl<'a> Executor<'a> {
             container_config,
             seccomp_profile: Some("minimal".to_string()),
             security_level: crate::sandbox::SecurityLevel::Minimal,
+            inherit_environment: !config.hermetic_env,
         }
     }
 
@@ -400,7 +412,13 @@ impl<'a> Executor<'a> {
                 // rewrite one fails at the write, instead of the receipt
                 // failing afterwards to describe what was built.
                 let guard = InputGuard::hold(&workspace, &step.inputs)?;
-                self.inputs_guarded = Some(self.inputs_guarded.unwrap_or(true) && guard.enforced());
+                self.inputs_held.executed += 1;
+                self.inputs_held.guard_applied = (self.inputs_held.executed == 1
+                    || self.inputs_held.guard_applied)
+                    && guard.enforced();
+                if capsule.is_some() {
+                    self.inputs_held.in_capsule += 1;
+                }
                 let execution_result = if let Some(manifest) = &capsule {
                     Self::execute_step_in_capsule(manifest, step, &workspace)
                 } else {
@@ -507,34 +525,57 @@ impl<'a> Executor<'a> {
             .filter(|s| s.capsule_hash.is_some())
             .map(|s| s.name.clone())
             .collect();
-        // Declared inputs: held read-only while each step ran, when the
-        // platform and the user allow permission bits to bind. The re-hash
-        // after each step detects what the bits could not prevent.
-        let (status, detail) = match self.inputs_guarded {
-            Some(true) => (
+        // Declared inputs. A capsule mounts them read-only and the runtime
+        // refuses the write, whatever the step runs as: that is enforced. A
+        // local step gets its inputs' write bits dropped, which refuses a
+        // plain write but not a step that puts the bits back, changes the
+        // file and restores it before it ends; the re-hash afterwards sees
+        // nothing. So the row says not enforced outside a capsule, and says
+        // why, rather than naming a guard as a guarantee.
+        let held = &self.inputs_held;
+        let (status, detail) = if held.executed == 0 {
+            (
+                crate::sandbox::ControlStatus::NotEnforced,
+                "no step executed (every step was a cache hit)".to_string(),
+            )
+        } else if held.in_capsule == held.executed {
+            (
                 crate::sandbox::ControlStatus::Enforced,
-                "declared inputs unwritable (permission bits) for each step's duration, capsule \
-                 inputs mounted read-only; changes are also detected by re-hashing after the step",
-            ),
-            Some(false) if cfg!(unix) => (
+                "declared inputs mounted read-only in the capsule for every step; the runtime \
+                 refuses writes to them"
+                    .to_string(),
+            )
+        } else if held.guard_applied {
+            (
+                crate::sandbox::ControlStatus::NotEnforced,
+                format!(
+                    "write bits dropped on declared inputs while each step ran, which refuses a \
+                     plain write but not a step that restores the bits, changes a file and puts \
+                     it back before it ends; changes still present after the step are detected \
+                     by re-hashing, changes undone before it ends are not. Only a capsule \
+                     enforces this ({} of {} steps ran in one)",
+                    held.in_capsule, held.executed
+                ),
+            )
+        } else if cfg!(unix) {
+            (
                 crate::sandbox::ControlStatus::NotEnforced,
                 "running as root, permission bits do not bind; changes to declared inputs are \
-                 detected by re-hashing after the step, not prevented",
-            ),
-            Some(false) => (
+                 detected by re-hashing after the step, not prevented"
+                    .to_string(),
+            )
+        } else {
+            (
                 crate::sandbox::ControlStatus::NotAvailable,
                 "no read-only view on this platform; changes to declared inputs are detected by \
-                 re-hashing after the step, not prevented",
-            ),
-            None => (
-                crate::sandbox::ControlStatus::NotEnforced,
-                "no step executed (every step was a cache hit)",
-            ),
+                 re-hashing after the step, not prevented"
+                    .to_string(),
+            )
         };
         isolation.controls.push(crate::sandbox::IsolationControl {
             name: "inputs".to_string(),
             status,
-            detail: detail.to_string(),
+            detail,
         });
 
         let mut receipt = Receipt {

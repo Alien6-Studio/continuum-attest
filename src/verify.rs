@@ -457,7 +457,12 @@ pub fn verify_receipt_bytes(
         "pass"
     };
 
-    let trust_material = trust_material(opts, chrono::Utc::now(), &mut warnings);
+    let trust_material = trust_material(
+        opts,
+        signed_by.as_deref(),
+        chrono::Utc::now(),
+        &mut warnings,
+    );
     let execution = receipt
         .as_ref()
         .map(execution_outcome)
@@ -486,6 +491,7 @@ pub fn verify_receipt_bytes(
 /// states the window so that policy has something to act on.
 fn trust_material(
     opts: &VerifyOptions,
+    signer_public_key: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
     warnings: &mut Vec<String>,
 ) -> TrustMaterial {
@@ -494,25 +500,45 @@ fn trust_material(
         .clone()
         .unwrap_or_else(|| opts.workspace.join(".attest").join("trust"));
     let judged_by = "local clock".to_string();
-    let latest = match crate::trust::latest_accepted(&store) {
-        Ok(latest) => latest,
+    let none = TrustMaterial {
+        state: "none".to_string(),
+        issuer: None,
+        sequence: None,
+        valid_until: None,
+        judged_by: judged_by.clone(),
+    };
+    // The material that matters is the bundle vouching for the key that
+    // signed this receipt. A newer bundle from some other issuer says
+    // nothing about this signer, and must not make an expired one look
+    // current.
+    let signer_id = match signer_public_key.and_then(|k| crate::keys::key_id_from_hex(k).ok()) {
+        Some(id) => id,
+        None => return none,
+    };
+    let accepted = match crate::trust::accepted_bundles(&store) {
+        Ok(bundles) => bundles,
         Err(err) => {
             warnings.push(format!(
                 "cannot read the accepted trust bundles in {}: {err:#}; treating the store as \
                  having none on record",
                 store.join("bundles").display()
             ));
-            None
+            Vec::new()
         }
     };
+    let had_bundles = !accepted.is_empty();
+    let latest = accepted
+        .into_iter()
+        .filter(|b| b.keys.iter().any(|k| k.id == signer_id))
+        .max_by_key(|b| b.sequence);
+    if latest.is_none() && had_bundles {
+        warnings.push(format!(
+            "no accepted trust bundle vouches for signing key {signer_id}; its trust rests on \
+             this store's manual entries alone"
+        ));
+    }
     match latest {
-        None => TrustMaterial {
-            state: "none".to_string(),
-            issuer: None,
-            sequence: None,
-            valid_until: None,
-            judged_by,
-        },
+        None => none,
         Some(bundle) => {
             let expired = now > bundle.valid_until;
             if expired {

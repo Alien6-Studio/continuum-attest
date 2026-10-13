@@ -125,6 +125,15 @@ pub struct SandboxConfig {
     pub container_config: Option<ContainerConfig>,
     pub seccomp_profile: Option<String>,
     pub security_level: SecurityLevel,
+    /// Whether the step inherits the ambient environment. `false` under a
+    /// hermetic run: the command gets exactly the variables it is given
+    /// (plus PATH, to find tools), nothing from the runner.
+    #[serde(default = "default_inherit_environment")]
+    pub inherit_environment: bool,
+}
+
+fn default_inherit_environment() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -205,6 +214,7 @@ impl Default for SandboxConfig {
             container_config: None,
             seccomp_profile: Some("minimal".to_string()),
             security_level: SecurityLevel::Minimal,
+            inherit_environment: true,
         }
     }
 }
@@ -383,8 +393,19 @@ impl Sandbox {
         let mut cmd = Command::new(command);
         cmd.args(args);
 
-        // Set environment variables
-        let mut effective_env = std::env::vars().collect::<HashMap<_, _>>();
+        // Set environment variables. Hermetic: nothing ambient reaches the
+        // step; PATH is kept only so that tools resolve, and only when the
+        // step did not set it.
+        let mut effective_env: HashMap<String, String> = if self.config.inherit_environment {
+            std::env::vars().collect()
+        } else {
+            cmd.env_clear();
+            std::env::var("PATH")
+                .ok()
+                .map(|path| ("PATH".to_string(), path))
+                .into_iter()
+                .collect()
+        };
         effective_env.extend(env.clone());
 
         // Add deterministic time if configured
@@ -456,6 +477,16 @@ impl Sandbox {
         }
 
         effective_env.extend(env.clone());
+        if !self.config.inherit_environment {
+            // Hermetic: nothing ambient reaches the step. PATH is kept only
+            // so that tools resolve, and only when the step did not set it.
+            cmd.env_clear();
+            if !effective_env.contains_key("PATH") {
+                if let Ok(path) = std::env::var("PATH") {
+                    cmd.env("PATH", path);
+                }
+            }
+        }
         cmd.envs(&effective_env);
 
         if let Some(dir) = working_dir {
@@ -589,7 +620,7 @@ impl Sandbox {
                             NotEnforced,
                             "no seccomp or capability drop outside a container; steps keep the runner's privileges",
                         ),
-                        environment_control(hermetic_env),
+                        environment_control(hermetic_env && !self.config.inherit_environment),
                         control("memory", memory, memory_detail),
                         control("open-files", files, files_detail),
                         control(

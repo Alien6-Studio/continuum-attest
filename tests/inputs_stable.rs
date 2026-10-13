@@ -69,7 +69,80 @@ fn a_step_cannot_write_a_declared_input_file() {
         .iter()
         .find(|c| c["name"] == "inputs")
         .unwrap();
-    assert_eq!(inputs["status"], "enforced", "{inputs:?}");
+    // Permission bits refuse a plain write; they are not a guarantee, and
+    // the receipt must not call them one.
+    assert_eq!(inputs["status"], "not-enforced", "{inputs:?}");
+    assert!(inputs["detail"]
+        .as_str()
+        .unwrap()
+        .contains("Only a capsule enforces"));
+}
+
+/// The limit of permission bits, stated rather than hidden: a step that
+/// puts the write bit back, changes an input, uses it and restores it
+/// before it ends is not caught, and the receipt's inputs row says so.
+#[cfg(unix)]
+#[test]
+fn a_step_that_restores_its_input_is_not_caught_and_the_receipt_says_so() {
+    let dir = workspace(
+        "version: \"1.0\"\nname: revert\nsteps:\n  revert:\n    run: \"chmod u+w in.txt && cp in.txt .keep && echo tampered > in.txt && cat in.txt > out.txt && cp .keep in.txt\"\n    inputs: [\"in.txt\"]\n    outputs: [\"out.txt\"]\n    cache: false\n",
+    );
+    attest()
+        .arg("run")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "tampered\n"
+    );
+    let receipt = receipt(dir.path()).unwrap();
+    let inputs = receipt["isolation"]["controls"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "inputs")
+        .unwrap();
+    assert_eq!(inputs["status"], "not-enforced");
+    assert!(inputs["detail"]
+        .as_str()
+        .unwrap()
+        .contains("changes undone before it ends are not"));
+}
+
+/// A link among the inputs is attested as a link; the bytes it leads to
+/// are attested only if its target is declared too. A link to an
+/// undeclared file is refused, a link to a declared one is accepted.
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_an_undeclared_file_is_refused_as_an_input() {
+    let dir = workspace(
+        "version: \"1.0\"\nname: link\nsteps:\n  read:\n    run: \"cat link > out.txt\"\n    inputs: [\"link\"]\n    outputs: [\"out.txt\"]\n    cache: false\n",
+    );
+    std::fs::write(dir.path().join("hidden.txt"), "unattested\n").unwrap();
+    std::os::unix::fs::symlink("hidden.txt", dir.path().join("link")).unwrap();
+    attest()
+        .arg("run")
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not under any declared path"));
+
+    // Declared alongside, the same link is fine, and its target is held.
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        "version: \"1.0\"\nname: link\nsteps:\n  read:\n    run: \"cat link > out.txt\"\n    inputs: [\"link\", \"hidden.txt\"]\n    outputs: [\"out.txt\"]\n    cache: false\n",
+    )
+    .unwrap();
+    attest()
+        .arg("run")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "unattested\n"
+    );
 }
 
 /// A declared input directory is held still as a whole: nothing inside it

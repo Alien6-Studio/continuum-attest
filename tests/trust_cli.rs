@@ -619,3 +619,96 @@ fn a_verdict_states_the_period_its_trust_material_covers() {
     let record: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
     assert_eq!(record["trust_material"]["state"], "expired");
 }
+
+/// Freshness is about the bundle that vouches for the signer. A newer
+/// bundle from an unrelated issuer must not make the signer's expired
+/// trust material look current, and a key no bundle covers is said so.
+#[test]
+fn trust_material_follows_the_signer_not_the_newest_bundle() {
+    let (producer_a, key_a, receipt_a) = producer_with_signed_receipt();
+    let bundle_a = bundle_to(producer_a.path(), "a.json", &["--valid-for", "30"]);
+    let producer_b = tempfile::tempdir().unwrap();
+    init(producer_b.path());
+    let key_b = generate(producer_b.path(), "other");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let bundle_b = bundle_to(producer_b.path(), "b.json", &["--valid-for", "30"]);
+
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    let trust = recipient.path().join(".attest/trust");
+    for (bundle, issuer) in [(&bundle_a, &key_a), (&bundle_b, &key_b)] {
+        attest()
+            .args([
+                "trust",
+                "import",
+                bundle.to_str().unwrap(),
+                "--issuer",
+                issuer,
+            ])
+            .current_dir(recipient.path())
+            .assert()
+            .success();
+    }
+
+    // A's bundle expires; B's, newer, stays current.
+    let accepted = trust.join("bundles").join(format!("{key_a}.json"));
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&accepted).unwrap()).unwrap();
+    stored["valid_until"] = serde_json::Value::String("2020-01-01T00:00:00Z".into());
+    std::fs::write(&accepted, serde_json::to_string(&stored).unwrap()).unwrap();
+
+    let out = attest()
+        .args([
+            "verify",
+            receipt_a.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .current_dir(producer_a.path())
+        .output()
+        .unwrap();
+    let record: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(record["trust_material"]["state"], "expired", "{record}");
+    assert_eq!(record["trust_material"]["issuer"], key_a);
+    attest()
+        .args([
+            "verify",
+            receipt_a.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--require",
+            "signature,trust",
+        ])
+        .current_dir(producer_a.path())
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requirement 'trust' not met"));
+
+    // A key the recipient trusts by hand, covered by no bundle: said so.
+    let local = generate(recipient.path(), "local");
+    std::fs::write(recipient.path().join("attest.yaml"), TOY_PIPELINE).unwrap();
+    std::fs::write(recipient.path().join("in.txt"), "payload").unwrap();
+    attest()
+        .args(["run", "--sign", "--key", &local])
+        .current_dir(recipient.path())
+        .assert()
+        .success();
+    let own = std::fs::read_dir(recipient.path().join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .unwrap();
+    attest()
+        .args(["verify", own.to_str().unwrap(), "--format", "json"])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains("\"state\":\"none\""))
+        .stderr(predicates::str::contains(
+            "no accepted trust bundle vouches for signing key",
+        ));
+}

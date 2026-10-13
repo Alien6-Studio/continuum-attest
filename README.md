@@ -183,16 +183,19 @@ you discover it during an audit:
   receipts, even when its private half is local. A policy with a status
   outside `trusted`/`revoked`, or naming a key whose file is missing or
   holds another key, does not load at all.
-- **Inputs are held still, and the receipt says how.** While a step runs,
-  every file and directory under its declared inputs is unwritable: by
-  permission bits for a local step, by a read-only mount for a capsule. That
-  is prevention, and the `inputs` row of the receipt's isolation block says
-  whether it was in force (not as root, not on a platform without permission
-  bits). What the bits cannot prevent, a same-user process putting them back
-  or another process on the host, the re-hash after the step detects: the run
-  refuses to write a receipt for inputs that changed. Symbolic links among
-  declared inputs are recorded as links, never followed, and a link pointing
-  outside the workspace is refused.
+- **Inputs are held still only inside a capsule, and the receipt says so.**
+  A capsule mounts each declared input read-only, and the runtime refuses the
+  write whatever the step runs as: that is enforced, and the `inputs` row of
+  the receipt's isolation block says `enforced` only when every step ran in
+  one. A local step gets its inputs' write bits dropped while it runs, which
+  refuses a plain write and nothing more: a step that puts the bits back,
+  changes an input, uses it and restores it before it ends is not caught,
+  because the re-hash after the step sees the restored file. The row says
+  `not-enforced` for such runs and says why. Changes still present after the
+  step are detected and the run refuses to write a receipt. Symbolic links
+  among declared inputs are recorded as links, never followed; a link pointing
+  outside the workspace is refused, and so is one whose target is not itself
+  declared, because the bytes behind it would not be attested.
 - **The build never holds the key.** `attest run --sign` loads the signing
   key only after the last step has exited, so no step runs in a process that
   holds it. The key file itself is another matter: `.attest/keys/` is in the

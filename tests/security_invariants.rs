@@ -1821,6 +1821,165 @@ fn forging_a_declared_input_from_inside_the_step_is_refused() {
     );
 }
 
+/// A link declared as an input was attested as a link: its target's path,
+/// never its target's bytes. A step reading through it consumed bytes the
+/// manifest did not cover, so changing the target changed nothing a
+/// verifier could see. A link whose target is not itself declared is now
+/// refused, and this holds the refusal.
+#[cfg(unix)]
+#[test]
+fn forging_an_input_through_a_symlink_to_an_undeclared_file_is_refused() {
+    let dir = workspace(
+        "version: \"0.1\"\n\
+         name: link\n\
+         steps:\n  \
+           build:\n    \
+             run: \"cat link > out.txt\"\n    \
+             inputs: [\"link\"]\n    \
+             outputs: [\"out.txt\"]\n",
+    );
+    std::fs::write(dir.path().join("target.txt"), "v1\n").unwrap();
+    std::os::unix::fs::symlink("target.txt", dir.path().join("link")).unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("run")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not under any declared path"));
+    assert!(
+        !dir.path().join("out.txt").exists(),
+        "the step must not have run"
+    );
+}
+
+/// Freshness is a statement about the bundle that vouches for the signer.
+/// With the newest bundle taken across issuers, an attacker who can get
+/// any current bundle accepted, their own, say, would make a signer's
+/// expired trust material read as current. The verdict is held to the
+/// signer's own issuer.
+#[test]
+fn forging_trust_freshness_with_another_issuers_bundle_is_refused() {
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let generate = |dir: &std::path::Path, name: &str| {
+        let out = attest()
+            .current_dir(dir)
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let bundle = |dir: &std::path::Path, file: &str| {
+        let path = dir.join(file);
+        attest()
+            .current_dir(dir)
+            .args(["trust", "bundle", "--output", path.to_str().unwrap()])
+            .assert()
+            .success();
+        path
+    };
+    let signer = generate(producer.path(), "signer");
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &signer])
+        .assert()
+        .success();
+    let receipt = run_receipt_path(producer.path());
+    let theirs = bundle(producer.path(), "signer.json");
+
+    let other = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(other.path())
+        .arg("init")
+        .assert()
+        .success();
+    let unrelated = generate(other.path(), "unrelated");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let newer = bundle(other.path(), "unrelated.json");
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    let trust = recipient.path().join(".attest/trust");
+    for (path, issuer) in [(&theirs, &signer), (&newer, &unrelated)] {
+        attest()
+            .current_dir(recipient.path())
+            .args([
+                "trust",
+                "import",
+                path.to_str().unwrap(),
+                "--issuer",
+                issuer,
+            ])
+            .assert()
+            .success();
+    }
+    let accepted = trust.join("bundles").join(format!("{signer}.json"));
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&accepted).unwrap()).unwrap();
+    stored["valid_until"] = serde_json::Value::String("2020-01-01T00:00:00Z".into());
+    std::fs::write(&accepted, serde_json::to_string(&stored).unwrap()).unwrap();
+
+    attest()
+        .current_dir(producer.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--require",
+            "signature,trust",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requirement 'trust' not met"));
+}
+
+fn run_receipt_path(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(dir.join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .expect("a receipt was written")
+}
+
+/// A hermetic run promised that nothing ambient reached the step, and
+/// the receipt said environment: enforced. Under --verify the sandbox
+/// added the normalized variables on top of the inherited ones, so the
+/// promise held only without --verify. The step probes for a marker the
+/// runner sets; the receipt of a hermetic run must not contain it.
+#[test]
+fn forging_a_hermetic_environment_by_inheriting_the_ambient_one_is_refused() {
+    let dir = workspace(
+        "version: \"0.1\"\n\
+         name: env\n\
+         steps:\n  \
+           probe:\n    \
+             run: \"printenv AMBIENT_MARKER || echo absent\"\n    \
+             inputs: []\n    \
+             outputs: []\n    \
+             cache: false\n",
+    );
+    attest()
+        .current_dir(dir.path())
+        .env("AMBIENT_MARKER", "leaked")
+        .args(["run", "--verify", "--check-reproducibility"])
+        .assert()
+        .success();
+    let receipt: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(run_receipt_path(dir.path())).unwrap())
+            .unwrap();
+    let stdout = receipt["steps"][0]["stdout"].as_str().unwrap().to_string();
+    assert!(
+        !stdout.contains("leaked"),
+        "the ambient marker reached a hermetic step: {stdout}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

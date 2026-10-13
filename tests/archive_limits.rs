@@ -343,3 +343,63 @@ fn an_ordinary_archive_still_verifies_within_the_limits() {
         .assert()
         .code(0);
 }
+
+/// PAX extension headers and GNU long names are physical entries the tar
+/// reader folds into the next one, past the entry count and the per-entry
+/// size. The writer produces neither, and the reader refuses both.
+#[test]
+fn pax_extensions_and_long_names_are_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let with_pax = {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_size(manifest().len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "manifest.json", &manifest()[..])
+            .unwrap();
+        let padding = "x".repeat(32 * 1024);
+        let mut header = tar::Header::new_ustar();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_pax_extensions([("comment", padding.as_bytes())])
+            .unwrap();
+        builder
+            .append_data(&mut header, "receipt.yaml", &b"x"[..])
+            .unwrap();
+        let bytes = builder.into_inner().unwrap();
+        write(
+            tmp.path(),
+            "pax.attest.tar.zst",
+            &zstd::encode_all(&bytes[..], 3).unwrap(),
+        )
+    };
+    refused(
+        tmp.path(),
+        &with_pax,
+        &["--max-entry-bytes", "8192", "--max-entries", "3"],
+        "operational",
+        "PAX extensions",
+    );
+
+    let long = format!("events/{}.json", "a".repeat(120));
+    let with_long_name = write(
+        tmp.path(),
+        "long.attest.tar.zst",
+        &pack(&[
+            ("manifest.json", &manifest(), tar::EntryType::Regular),
+            (long.as_str(), b"{}", tar::EntryType::Regular),
+        ]),
+    );
+    refused(
+        tmp.path(),
+        &with_long_name,
+        &[],
+        "operational",
+        "long-name extension",
+    );
+}

@@ -191,3 +191,39 @@ fn sign_refuses_a_tsa_without_a_timestamp() {
         .code(2)
         .stderr(predicates::str::contains("--tsa requires --timestamp"));
 }
+
+/// The signer holds the receipt to the verifier's schema and consistency
+/// checks before vouching for it: a receipt the same binary would refuse
+/// is not signed.
+#[test]
+fn sign_refuses_a_receipt_the_verifier_would_refuse() {
+    let dir = workspace();
+    let key = generate(dir.path(), "release");
+    attest()
+        .arg("run")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let receipt = receipt_in(dir.path());
+    let text = std::fs::read_to_string(&receipt).unwrap();
+    assert!(text.contains("schema_version: 3"));
+    std::fs::write(
+        &receipt,
+        text.replace("schema_version: 3", "schema_version: 999"),
+    )
+    .unwrap();
+
+    attest()
+        .args(["sign", receipt.to_str().unwrap(), "--key", &key])
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("refusing to sign"))
+        .stderr(predicates::str::contains("schema"));
+    assert!(
+        !std::fs::read_to_string(&receipt)
+            .unwrap()
+            .contains("signer_public_key: \""),
+        "a refused receipt is left unsigned"
+    );
+}

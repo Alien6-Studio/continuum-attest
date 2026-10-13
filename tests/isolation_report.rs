@@ -159,3 +159,47 @@ fn the_isolation_claims_are_covered_by_the_signature() {
         .code(1)
         .stdout(predicates::str::contains("signature"));
 }
+
+/// Under a hermetic run the step sees nothing of the runner's environment,
+/// and the receipt's environment row says enforced; under a plain
+/// --verify it sees everything, and the row says so.
+#[test]
+fn a_hermetic_run_hides_the_ambient_environment_from_the_step() {
+    let pipeline = "version: \"1.0\"\nname: env\nsteps:\n  probe:\n    run: \"printenv AMBIENT_MARKER || echo absent\"\n    inputs: []\n    outputs: []\n    cache: false\n";
+    let dir = workspace();
+    std::fs::write(dir.path().join("attest.yaml"), pipeline).unwrap();
+
+    attest()
+        .args(["run", "--verify"])
+        .env("AMBIENT_MARKER", "leaked")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let plain = receipt(dir.path());
+    assert!(plain["steps"][0]["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("leaked"));
+    assert_eq!(
+        control(&plain["isolation"], "environment")["status"],
+        "not-enforced"
+    );
+    std::fs::remove_dir_all(dir.path().join(".attest/receipts")).unwrap();
+
+    attest()
+        .args(["run", "--verify", "--check-reproducibility"])
+        .env("AMBIENT_MARKER", "leaked")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let hermetic = receipt(dir.path());
+    let stdout = hermetic["steps"][0]["stdout"].as_str().unwrap();
+    assert!(
+        stdout.contains("absent") && !stdout.contains("leaked"),
+        "{stdout}"
+    );
+    assert_eq!(
+        control(&hermetic["isolation"], "environment")["status"],
+        "enforced"
+    );
+}

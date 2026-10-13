@@ -940,6 +940,37 @@ pub fn sign_receipt_file(
         return Ok(1);
     }
 
+    // The signer vouches for a receipt it did not produce, so it holds the
+    // receipt to the same schema and consistency checks the verifier will:
+    // a signature over a receipt that cannot verify is worse than none.
+    let scrutiny = crate::verify::VerifyOptions {
+        check_signatures: false,
+        recompute: false,
+        workspace: workspace.to_path_buf(),
+        trust_store: None,
+        trust_receipt_timestamp: false,
+        policy: crate::verify::Policy::default(),
+    };
+    let verdict = crate::verify::verify_receipt_bytes(
+        &bytes,
+        &receipt_path.display().to_string(),
+        &scrutiny,
+    )?;
+    let failed: Vec<String> = verdict
+        .checks
+        .iter()
+        .filter(|c| c.status == crate::verify::CheckStatus::Fail)
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    if !failed.is_empty() {
+        eprintln!(
+            "error: refusing to sign {}: {}",
+            receipt_path.display(),
+            failed.join("; ")
+        );
+        return Ok(1);
+    }
+
     let mut storage = Storage::new(workspace)?;
     storage.set_keypair(load_signing_keypair(workspace, key)?);
     let receipt = storage.sign_receipt(&receipt)?;

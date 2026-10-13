@@ -211,6 +211,28 @@ pub fn read_archive_bounded(path: &Path, limits: &ArchiveLimits) -> Result<Vec<A
         let mut entry = entry
             .map_err(surface_limit)
             .context("corrupt archive entry")?;
+        // PAX extensions and GNU long names are physical entries the tar
+        // reader folds into the next one, past the entry count and the
+        // per-entry size. The writer produces neither, so a reader has no
+        // reason to accept them.
+        if entry.pax_extensions().map_err(surface_limit)?.is_some() {
+            bail!("archive entry carries PAX extensions; an attest archive has none");
+        }
+        let raw_path = entry
+            .header()
+            .path()
+            .map_err(anyhow::Error::new)?
+            .into_owned();
+        let full_path = entry
+            .path()
+            .context("archive entry has an unreadable path")?
+            .into_owned();
+        if raw_path != full_path {
+            bail!(
+                "archive entry {} uses a long-name extension; an attest archive has none",
+                full_path.display()
+            );
+        }
         let kind = entry.header().entry_type();
         if kind != tar::EntryType::Regular {
             bail!(

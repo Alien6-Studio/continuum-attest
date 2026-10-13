@@ -260,6 +260,38 @@ mutate "declared inputs are unwritable while the step runs" src/executor/mod.rs 
 assert s.count(old) == 1, "input guard moved"
 new = s.replace(old, "let guard = InputGuard::hold(&workspace, &[])?;")'
 
+mutate "a symlink's target must be declared" src/hashing.rs \
+  security_invariants forging_an_input_through_a_symlink_to_an_undeclared_file_is_refused \
+  'old = "        if !covered {"
+assert s.count(old) == 1, "symlink coverage check moved"
+new = s.replace(old, "        if false {")'
+
+mutate "trust freshness follows the signer" src/verify.rs \
+  security_invariants forging_trust_freshness_with_another_issuers_bundle_is_refused \
+  'old = "        .filter(|b| b.keys.iter().any(|k| k.id == signer_id))"
+assert s.count(old) == 1, "per-signer bundle filter moved"
+new = s.replace(old, "        .filter(|b| b.keys.iter().any(|k| k.id == signer_id || true))")'
+
+mutate "a hermetic sandbox clears the ambient environment" src/sandbox/mod.rs \
+  security_invariants forging_a_hermetic_environment_by_inheriting_the_ambient_one_is_refused \
+  'old = """        if !self.config.inherit_environment {
+            // Hermetic: nothing ambient reaches the step. PATH is kept only"""
+assert s.count(old) == 1, "unix-path env_clear moved"
+new = s.replace(old, """        if false {
+            // Hermetic: nothing ambient reaches the step. PATH is kept only""")'
+
+mutate "sign holds the receipt to the verifier's checks" src/core.rs \
+  sign_cli sign_refuses_a_receipt_the_verifier_would_refuse \
+  'old = "    if !failed.is_empty() {\n        eprintln!(\n            \"error: refusing to sign {}: {}\","
+assert s.count(old) == 1, "sign scrutiny moved"
+new = s.replace(old, "    if false {\n        eprintln!(\n            \"error: refusing to sign {}: {}\",")'
+
+mutate "PAX extensions do not slip past the entry limits" src/archive.rs \
+  archive_limits pax_extensions_and_long_names_are_refused \
+  'old = "        if entry.pax_extensions().map_err(surface_limit)?.is_some() {"
+assert s.count(old) == 1, "PAX check moved"
+new = s.replace(old, "        if entry.pax_extensions().map_err(surface_limit)?.is_some() && false {")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());
