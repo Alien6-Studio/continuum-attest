@@ -17,15 +17,22 @@ plugin — that boundary is deliberate and we will not move it.
 
 ## Setting up
 
-You need a Rust toolchain. Either install one locally:
+You need a Rust toolchain on a supported platform: Linux or macOS, x86-64 or
+arm64. Install one locally:
 
 ```console
 $ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-…or work in a container, which needs nothing but Docker. CI installs a
-toolchain rather than using an image, so this is a convenience, not the same
-environment:
+Then the gates below run natively, against your platform's own filesystem,
+permission bits and archive tools. That is the run that matters: CI tests
+every platform a release ships for, and a Mac is where the macOS-specific
+behaviour gets exercised.
+
+A container needs nothing but Docker, but it is a Linux build with Linux
+semantics, whatever the host. It is a convenience when a toolchain is not an
+option, not a substitute for testing on the platform you are on. CI installs a
+toolchain rather than using an image, so it is not the CI environment either:
 
 ```console
 $ docker run --rm -v "$(pwd)":/w -w /w \

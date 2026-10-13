@@ -17,9 +17,36 @@ permissions:
   contents: read
 
 jobs:
-  gates:
-    name: Quality gates
+  # One list of platforms, read by the gates and by the build. A binary is
+  # published only for a platform whose test suite passed on that platform,
+  # and a target cannot be added to the build without its gate, because
+  # both jobs expand the same output. ci.yml carries the same list for pull
+  # requests; keep the two identical.
+  #
+  # No Windows target: the private-key and connection-directory
+  # permission hardening is `#[cfg(unix)]` with no Windows
+  # equivalent, so a Windows build would write key material with
+  # inherited ACLs. Adding the target means writing that code first.
+  platforms:
+    name: Platforms
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - id: list
+        run: |
+          cat >> "$GITHUB_OUTPUT" <<'EOF'
+          matrix=[{"os":"ubuntu-latest","name":"linux-x86_64"},{"os":"ubuntu-24.04-arm","name":"linux-aarch64"},{"os":"macos-15-intel","name":"macos-x86_64"},{"os":"macos-14","name":"macos-aarch64"}]
+          EOF
+
+  gates:
+    name: gates (${{ matrix.name }})
+    needs: platforms
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.platforms.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned to match ci.yml: a tag must not fail on a lint that did not
@@ -29,26 +56,21 @@ jobs:
           toolchain: "1.98.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --lib --bins --locked -- -D warnings
+      # Formatting and lints do not depend on the platform; once is enough.
+      - if: matrix.name == 'linux-x86_64'
+        run: cargo fmt --all -- --check
+      - if: matrix.name == 'linux-x86_64'
+        run: cargo clippy --lib --bins --locked -- -D warnings
       - run: cargo test --locked
 
   build:
     name: ${{ matrix.name }}
-    needs: gates
+    needs: [platforms, gates]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest,   name: linux-x86_64 }
-          - { os: ubuntu-24.04-arm, name: linux-aarch64 }
-          - { os: macos-15-intel,  name: macos-x86_64 }
-          - { os: macos-14,        name: macos-aarch64 }
-        # No Windows target: the private-key and connection-directory
-        # permission hardening is `#[cfg(unix)]` with no Windows
-        # equivalent, so a Windows build would write key material with
-        # inherited ACLs. Adding the target means writing that code first.
+        include: ${{ fromJSON(needs.platforms.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

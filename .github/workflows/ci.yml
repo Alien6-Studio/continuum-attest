@@ -80,17 +80,28 @@ jobs:
         run: tools/mutation-gate.sh
 
   gates:
-    name: gates (${{ matrix.os }})
+    name: gates (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Every platform release.yml publishes a binary for, and no other.
+        # A binary that ships must have run the test suite on its own OS
+        # and architecture, not on a neighbour that happens to compile the
+        # same source: permission bits, case-insensitive filesystems and
+        # the tar flavour all differ. Keep this list identical to the one
+        # in release.yml.
+        #
         # Linux and macOS only. The unix-specific paths (0o600 on private
         # keys, 0o700 on the connection directory) are `#[cfg(unix)]` with
         # no Windows equivalent, so a Windows build would write key
         # material without the intended permissions. See issue tracker
-        # before adding windows-latest here.
-        os: [ubuntu-latest, macos-latest]
+        # before adding a Windows runner here.
+        include:
+          - { os: ubuntu-latest,    name: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, name: linux-aarch64 }
+          - { os: macos-15-intel,   name: macos-x86_64 }
+          - { os: macos-14,         name: macos-aarch64 }
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -127,10 +138,17 @@ jobs:
 
       - run: cargo check --all-targets --locked
 
+  # On Linux and on macOS: a recipient on a Mac produces and verifies a
+  # receipt with the platform's own filesystem semantics, so that path is
+  # exercised before a release, not discovered by the first Mac user.
   dogfood:
-    name: attest attests itself
-    runs-on: ubuntu-latest
+    name: attest attests itself (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: [lint, gates, invariants]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -180,7 +198,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: receipts
+          name: receipts-${{ matrix.os }}
           path: .attest/receipts/
           # `.attest/` is hidden; without this the action uploads nothing.
           include-hidden-files: true
