@@ -935,6 +935,27 @@ fn forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_r
         .find(|p| p.extension().is_some_and(|x| x == "yaml"))
         .expect("a receipt was written");
 
+    // Exported while the key is still trusted: a revoked key cannot sign
+    // anything new, the envelope included, so the laundering attempt has to
+    // start from an envelope that already exists.
+    let statement = dir.path().join("statement.json");
+    let exported = attest()
+        .current_dir(dir.path())
+        .args([
+            "export",
+            "--receipt",
+            receipt.to_str().unwrap(),
+            "--format",
+            "in-toto",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        exported.status.success(),
+        "export should work before revocation"
+    );
+    std::fs::write(&statement, &exported.stdout).unwrap();
+
     attest()
         .current_dir(dir.path())
         .args(["keys", "revoke", &key_id])
@@ -954,21 +975,6 @@ fn forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_r
         String::from_utf8_lossy(&verified.stdout)
     );
 
-    let statement = dir.path().join("statement.json");
-    let exported = attest()
-        .current_dir(dir.path())
-        .args([
-            "export",
-            "--receipt",
-            receipt.to_str().unwrap(),
-            "--format",
-            "in-toto",
-        ])
-        .output()
-        .unwrap();
-    assert!(exported.status.success(), "export should still work");
-    std::fs::write(&statement, &exported.stdout).unwrap();
-
     let imported = attest()
         .current_dir(dir.path())
         .args(["import", "--format", "in-toto", statement.to_str().unwrap()])
@@ -983,6 +989,149 @@ fn forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_r
         !imported.status.success(),
         "a revoked signature must not become acceptable by changing envelope:\n{combined}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Key lifecycle: having a key is not being allowed to use it.
+// ---------------------------------------------------------------------------
+
+/// Revocation used to be judged only at verification time. The private
+/// half was still selectable for `--sign`, so a revoked key kept producing
+/// receipts that a verifier with the same policy would then refuse -- or
+/// accept, given `--trust-receipt-timestamp` and a backdated clock. The
+/// producer must refuse first: no receipt is written with a revoked key.
+#[test]
+fn forging_a_receipt_with_a_revoked_signing_key_is_refused() {
+    let dir = workspace(ONE_STEP);
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+
+    let key_id = {
+        let out = attest()
+            .current_dir(dir.path())
+            .args(["keys", "generate", "--name", "doomed"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    attest()
+        .current_dir(dir.path())
+        .args(["keys", "revoke", &key_id])
+        .assert()
+        .success();
+
+    // Named explicitly, and as the only private key present: both paths
+    // select the key, both must refuse it.
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--sign", "--key", &key_id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("revoked key cannot sign"));
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--sign"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("revoked key cannot sign"));
+
+    let receipts = dir.path().join(".attest/receipts");
+    let written = std::fs::read_dir(&receipts)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "yaml"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        written, 0,
+        "a refused signing must not leave a receipt behind"
+    );
+}
+
+/// A `.pub` file in the trust directory used to be enough: the verifier
+/// derived the id from the file and, finding no policy entry, treated the
+/// key as trusted. So anyone who could add a file to that directory -- a
+/// pull request that "adds a CI key", a sync of the wrong folder -- made
+/// themselves a trusted signer without touching `trust.toml`, the one file
+/// a reviewer reads. Presence is not trust; the entry is.
+#[test]
+fn forging_trust_by_dropping_a_public_key_into_the_trust_store_is_refused() {
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let key_id = {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", "intruder"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &key_id])
+        .assert()
+        .success();
+    let receipt = std::fs::read_dir(producer.path().join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .expect("a receipt was written");
+
+    // The verifier's trust store: a policy that lists nobody, plus the
+    // producer's public key file copied in without an entry.
+    let verifier = tempfile::tempdir().unwrap();
+    let trust = verifier.path().join("trust");
+    std::fs::create_dir_all(&trust).unwrap();
+    std::fs::write(trust.join("trust.toml"), "version = 1\n").unwrap();
+    let pub_name = format!("{key_id}.pub");
+    std::fs::copy(
+        producer.path().join(".attest/trust").join(&pub_name),
+        trust.join(&pub_name),
+    )
+    .unwrap();
+
+    attest()
+        .current_dir(producer.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("untrusted key"));
+
+    // The same key, admitted the documented way, is accepted: the refusal
+    // above was about the missing entry, not the key.
+    attest()
+        .current_dir(verifier.path())
+        .args([
+            "keys",
+            "import",
+            producer
+                .path()
+                .join(".attest/trust")
+                .join(&pub_name)
+                .to_str()
+                .unwrap(),
+            "--name",
+            "intruder",
+        ])
+        .assert()
+        .success();
+    attest()
+        .current_dir(producer.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            verifier.path().join(".attest/trust").to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
 }
 
 // ---------------------------------------------------------------------------

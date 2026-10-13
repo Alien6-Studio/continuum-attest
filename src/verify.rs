@@ -501,13 +501,18 @@ fn key_trust_status(opts: &VerifyOptions, public_key_hex: &str) -> Result<KeyTru
                 continue;
             }
             return Ok(match policy.entry(id) {
-                Some(entry) if entry.status == "revoked" => match entry.revoked_at {
-                    Some(at) => KeyTrust::Revoked(at),
-                    // revoked without a date: treat as always revoked
-                    None => KeyTrust::Revoked(chrono::DateTime::<chrono::Utc>::MIN_UTC),
+                Some(entry) => match entry.status {
+                    crate::keys::KeyStatus::Trusted => KeyTrust::Trusted,
+                    crate::keys::KeyStatus::Revoked => match entry.revoked_at {
+                        Some(at) => KeyTrust::Revoked(at),
+                        // revoked without a date: treat as always revoked
+                        None => KeyTrust::Revoked(chrono::DateTime::<chrono::Utc>::MIN_UTC),
+                    },
                 },
-                // present as .pub but no policy entry, or entry trusted
-                _ => KeyTrust::Trusted,
+                // A `.pub` file says the key exists. Only a policy entry
+                // says anyone trusts it; a file dropped into the directory
+                // must not become a trusted signer.
+                None => KeyTrust::Unknown,
             });
         }
 
