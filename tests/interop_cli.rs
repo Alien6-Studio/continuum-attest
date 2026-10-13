@@ -53,6 +53,15 @@ fn fixture_workspace() -> (tempfile::TempDir, String) {
         .expect("public PEM");
     std::fs::write(trust_dir.join(format!("{}.pub", id)), public_pem.as_bytes())
         .expect("write public key");
+    // A public key file alone is presence, not trust: the policy entry is
+    // what lets this key sign and be accepted.
+    std::fs::write(
+        trust_dir.join("trust.toml"),
+        format!(
+            "version = 1\n\n[[key]]\nid = \"{id}\"\nname = \"fixture\"\nstatus = \"trusted\"\n"
+        ),
+    )
+    .expect("write trust policy");
     (dir, id)
 }
 

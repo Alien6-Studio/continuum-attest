@@ -162,20 +162,46 @@ fn export_import_round_trip_verifies() {
 /// by the signer and covered by the signer's signature -- so whoever stole
 /// the key chose the date and walked past the revocation. Accepting that now
 /// requires asking for it explicitly.
+///
+/// Both receipts are produced while the key is still trusted, because a
+/// revoked key can no longer sign at all; the revocation is then dated
+/// between them, which is what a stolen key looks like from the verifier's
+/// side.
 #[test]
 fn revocation_semantics() {
     let tmp = tempfile::tempdir().unwrap();
     init_workspace(tmp.path());
     let id = generate(tmp.path(), "to-revoke");
 
-    // Signed BEFORE revocation.
     let receipt_before = run_signed(tmp.path(), &id);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let between = chrono::Utc::now();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(tmp.path().join("in.txt"), "payload v2").unwrap();
+    let receipt_after = run_signed(tmp.path(), &id);
+    assert_ne!(receipt_before, receipt_after);
 
     attest()
         .args(["keys", "revoke", &id])
         .current_dir(tmp.path())
         .assert()
         .code(0);
+    // `revoke` dates the revocation now; move it back between the two
+    // signatures.
+    let policy_path = tmp.path().join(".attest/trust/trust.toml");
+    let policy = std::fs::read_to_string(&policy_path).unwrap();
+    let dated: Vec<String> = policy
+        .lines()
+        .map(|line| {
+            if line.starts_with("revoked_at = ") {
+                format!("revoked_at = \"{}\"", between.to_rfc3339())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    assert_ne!(dated.join("\n"), policy, "revoked_at line not found");
+    std::fs::write(&policy_path, dated.join("\n") + "\n").unwrap();
 
     // No timestamp token, so there is no evidence the signature predates the
     // revocation: refused by default.
@@ -199,12 +225,7 @@ fn revocation_semantics() {
         .code(0)
         .stderr(predicates::str::contains("signed by key revoked later"));
 
-    // Signed AFTER revocation (new receipt, timestamp > revoked_at).
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::fs::write(tmp.path().join("in.txt"), "payload v2").unwrap();
-    let receipt_after = run_signed(tmp.path(), &id);
-    assert_ne!(receipt_before, receipt_after);
-
+    // Signed after the revocation date.
     attest()
         .args([
             "verify",
@@ -334,4 +355,79 @@ fn export_never_emits_private_material() {
         .current_dir(tmp.path())
         .assert()
         .code(2);
+}
+
+/// A status outside the closed set is not read as anything. The whole
+/// policy refuses to load, so listing, signing and verifying all stop
+/// rather than one of them quietly treating the key as trusted.
+#[test]
+fn unknown_key_status_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_workspace(tmp.path());
+    let id = generate(tmp.path(), "typo");
+    let receipt = run_signed(tmp.path(), &id);
+
+    let policy_path = tmp.path().join(".attest/trust/trust.toml");
+    let policy = std::fs::read_to_string(&policy_path).unwrap();
+    assert!(policy.contains("status = \"trusted\""));
+    std::fs::write(
+        &policy_path,
+        policy.replace("status = \"trusted\"", "status = \"compromised\""),
+    )
+    .unwrap();
+
+    attest()
+        .args(["keys", "list"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid trust policy"));
+
+    attest()
+        .args(["run", "--sign", "--key", &id])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid trust policy"));
+
+    attest()
+        .args(["verify", receipt.to_str().unwrap()])
+        .current_dir(tmp.path())
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("cannot load trust store"));
+}
+
+/// The policy and the key files are one store. An entry whose `.pub`
+/// holds a different key, or no `.pub` at all, is corruption and loads as
+/// nothing rather than as whichever half happens to be readable.
+#[test]
+fn trust_policy_that_contradicts_its_key_files_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_workspace(tmp.path());
+    let a = generate(tmp.path(), "a");
+    let b = generate(tmp.path(), "b");
+    let trust = tmp.path().join(".attest/trust");
+
+    // A's file now holds B's key: the entry for A names a key that is not
+    // what its file contains.
+    let a_pem = std::fs::read(trust.join(format!("{a}.pub"))).unwrap();
+    let b_pem = std::fs::read(trust.join(format!("{b}.pub"))).unwrap();
+    std::fs::write(trust.join(format!("{a}.pub")), &b_pem).unwrap();
+    attest()
+        .args(["keys", "list"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not the key its name claims"));
+
+    // Put A back, then remove B's file: the entry for B has nothing behind it.
+    std::fs::write(trust.join(format!("{a}.pub")), &a_pem).unwrap();
+    std::fs::remove_file(trust.join(format!("{b}.pub"))).unwrap();
+    attest()
+        .args(["keys", "list"])
+        .current_dir(tmp.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is missing"));
 }

@@ -177,6 +177,18 @@ mutate "import refuses a revoked key on the signer's own word" src/interop.rs \
   security_invariants forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_refused \
   'new = s.replace("            if !options.trust_statement_time {", "            if false {")'
 
+mutate "signing refuses a revoked key" src/keys.rs \
+  security_invariants forging_a_receipt_with_a_revoked_signing_key_is_refused \
+  'old = "            Some(entry) => match entry.status {"
+assert s.count(old) == 1, "authorize_signing match moved"
+new = s.replace(old, "            Some(entry) => match KeyStatus::Trusted {")'
+
+mutate "a public key file alone is not trust" src/verify.rs \
+  security_invariants forging_trust_by_dropping_a_public_key_into_the_trust_store_is_refused \
+  'old = "                None => KeyTrust::Unknown,\n            });"
+assert s.count(old) == 1, "presence-is-not-trust arm moved"
+new = s.replace(old, "                None => KeyTrust::Trusted,\n            });")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

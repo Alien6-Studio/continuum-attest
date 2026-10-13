@@ -135,6 +135,12 @@ say so here than let you discover them during an audit:
   different properties and this has only the first.
 - **The signer is a public key, not a person.** An Ed25519 key in a trust store
   has no binding to a legal identity.
+- **A key file is not trust, and trust is not permission to sign.** A `.pub`
+  in the trust directory only says the key exists; `trust.toml` says whether
+  anyone vouches for it, and only a key it lists as `trusted` can sign new
+  receipts, even when its private half is local. A policy with a status
+  outside `trusted`/`revoked`, or naming a key whose file is missing or
+  holds another key, does not load at all.
 - **Revoking a key does not reach anyone else.** `attest keys revoke` writes to
   your local trust store. A third party verifying your receipt reads their own
   copy, and nothing tells them it is out of date — there is no distribution

@@ -637,8 +637,23 @@ fn signature_check(
             )
         }
     };
-    if let Some(entry) = policy.entry(&signature.keyid) {
-        if entry.status == "revoked" {
+    // Presence in the trust directory is not trust: only a policy entry
+    // makes a key a signer anyone vouched for.
+    let Some(entry) = policy.entry(&signature.keyid) else {
+        return (
+            check(
+                "signature",
+                CheckStatus::Fail,
+                format!(
+                    "keyid {} has a public key in the trust store but no trust entry",
+                    signature.keyid
+                ),
+            ),
+            None,
+        );
+    };
+    {
+        if entry.status == crate::keys::KeyStatus::Revoked {
             let revoked_at = entry
                 .revoked_at
                 .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);

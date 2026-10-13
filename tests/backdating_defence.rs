@@ -101,7 +101,7 @@ fn a_timestamp_token_defeats_a_backdated_receipt() {
         .iter_mut()
         .find(|k| k.id == key_id)
         .expect("the key is in the trust store");
-    entry.status = "revoked".to_string();
+    entry.status = attest::keys::KeyStatus::Revoked;
     entry.revoked_at = Some(at(2026, 6, 1));
     policy.save(&trust_dir).expect("policy saved");
 
