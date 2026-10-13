@@ -93,7 +93,12 @@ panic there is a denial of service on the one operation users depend on. Return
 a typed error and let the caller decide.
 
 **Keep the exit-code convention.** `0` success, `1` a verification-meaningful
-failure, `2` an operational error. CI pipelines branch on these.
+failure, `2` an operational error. CI pipelines branch on these. An option
+that cannot take effect in the selected mode (`--timestamp` without `--sign`,
+`--key` without `--sign`, a `--wrap`-only option without `--wrap`) is a `2`
+refused before any project command runs, never silently ignored. Declare such
+a pairing as a `Prerequisite` in `src/main.rs`, next to the others, rather
+than checking it in the code that would eventually fail to honour it.
 
 **New behaviour needs a test.** Integration tests live in `tests/` and drive the
 real binary through `assert_cmd`. If you are fixing a bug, the test should fail

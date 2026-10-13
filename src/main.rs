@@ -652,18 +652,105 @@ async fn main() -> Result<()> {
             workspace,
             command,
         } => {
+            // Before anything runs, once, for every way a run can happen:
+            // a wrapped command, a pipeline, or a pipeline replayed for
+            // reproducibility all pass through here.
+            refuse_unmet(&[
+                Prerequisite {
+                    option: "--timestamp",
+                    given: timestamp,
+                    requires: "--sign",
+                    met: sign,
+                    why: "there is no signature to timestamp",
+                },
+                Prerequisite {
+                    option: "--key",
+                    given: key.is_some(),
+                    requires: "--sign",
+                    met: sign,
+                    why: "a key was named but nothing would be signed",
+                },
+                Prerequisite {
+                    option: "--tsa",
+                    given: tsa.is_some(),
+                    requires: "--timestamp",
+                    met: timestamp,
+                    why: "an authority was named but no timestamp was requested",
+                },
+                Prerequisite {
+                    option: "--wrap",
+                    given: wrap,
+                    requires: "--name <STEP_NAME>",
+                    met: name.is_some(),
+                    why: "the receipt records the wrapped command under a step name",
+                },
+                Prerequisite {
+                    option: "--wrap",
+                    given: wrap,
+                    requires: "a command after `--`",
+                    met: !command.is_empty(),
+                    why: "there is nothing to wrap otherwise",
+                },
+                Prerequisite {
+                    option: "--name",
+                    given: name.is_some(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run takes step names from the pipeline file",
+                },
+                Prerequisite {
+                    option: "--input",
+                    given: !inputs.is_empty(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run declares inputs in the pipeline file",
+                },
+                Prerequisite {
+                    option: "--output",
+                    given: !outputs.is_empty(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run declares outputs in the pipeline file",
+                },
+                Prerequisite {
+                    option: "--workspace",
+                    given: workspace.is_some(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run uses the current directory",
+                },
+                Prerequisite {
+                    option: "a command after `--`",
+                    given: !command.is_empty(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run takes its commands from the pipeline file",
+                },
+                Prerequisite {
+                    option: "--check-reproducibility",
+                    given: check_reproducibility,
+                    requires: "a pipeline run, not --wrap",
+                    met: !wrap,
+                    why: "a wrapped command runs once; there is nothing to replay",
+                },
+                Prerequisite {
+                    option: "--pipeline",
+                    given: pipeline.is_some(),
+                    requires: "a pipeline run, not --wrap",
+                    met: !wrap,
+                    why: "--wrap takes a command, not a pipeline file",
+                },
+                Prerequisite {
+                    option: "--verify",
+                    given: verify,
+                    requires: "a pipeline run, not --wrap",
+                    met: !wrap,
+                    why: "--wrap runs without a sandbox",
+                },
+            ]);
             if wrap {
-                let name = match name {
-                    Some(name) => name,
-                    None => {
-                        eprintln!("error: --wrap requires --name <STEP_NAME>");
-                        std::process::exit(2);
-                    }
-                };
-                if command.is_empty() {
-                    eprintln!("error: --wrap requires a command after `--`");
-                    std::process::exit(2);
-                }
+                // Both guaranteed by the rules above.
+                let name = name.unwrap_or_default();
                 let workspace = workspace
                     .map(std::path::PathBuf::from)
                     .map_or_else(std::env::current_dir, Ok)
@@ -671,10 +758,6 @@ async fn main() -> Result<()> {
                         eprintln!("error: cannot determine working directory: {e}");
                         std::process::exit(2);
                     });
-                if tsa.is_some() && !timestamp {
-                    eprintln!("error: --tsa requires --timestamp");
-                    std::process::exit(2);
-                }
                 let options = attest::wrap::WrapOptions {
                     name,
                     inputs: inputs.iter().map(std::path::PathBuf::from).collect(),
@@ -696,10 +779,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            if name.is_some() || !inputs.is_empty() || !outputs.is_empty() || !command.is_empty() {
-                eprintln!("error: --name/--input/--output/`-- <COMMAND>` require --wrap");
-                std::process::exit(2);
-            }
             let config = attest::executor::ExecutorConfig {
                 isolated: verify,
                 sign_results: sign,
@@ -710,13 +789,6 @@ async fn main() -> Result<()> {
                 sandbox_config: None,
                 hermetic_env: false,
             };
-            // `--tsa` without `--timestamp` is a mistake worth naming: the
-            // user asked for an authority and would otherwise silently get
-            // no timestamp at all.
-            if tsa.is_some() && !timestamp {
-                eprintln!("error: --tsa requires --timestamp");
-                std::process::exit(2);
-            }
             let tsa_url = timestamp.then(|| {
                 tsa.clone()
                     .unwrap_or_else(|| attest::crypto::timestamp::DEFAULT_TSA_URL.to_string())
@@ -936,6 +1008,13 @@ async fn main() -> Result<()> {
                 sign,
                 receipt_key,
             } => {
+                refuse_unmet(&[Prerequisite {
+                    option: "--receipt-key",
+                    given: receipt_key.is_some(),
+                    requires: "--sign",
+                    met: sign,
+                    why: "a key was named but the signing receipt would not be signed",
+                }]);
                 let code = handle_image_sign(
                     image_ref,
                     key,
@@ -962,6 +1041,13 @@ async fn main() -> Result<()> {
                 sign_receipt,
                 receipt_key,
             } => {
+                refuse_unmet(&[Prerequisite {
+                    option: "--receipt-key",
+                    given: receipt_key.is_some(),
+                    requires: "--sign-receipt",
+                    met: sign_receipt,
+                    why: "a key was named but the verification receipt would not be signed",
+                }]);
                 let receipt_requested = receipt || receipt_dir.is_some() || sign_receipt;
                 let supply_chain_requested = require_sbom
                     || require_provenance
@@ -1143,6 +1229,35 @@ fn handle_keys(action: KeysCommands) -> i32 {
                 2
             }
         },
+    }
+}
+
+/// An option whose effect depends on another option. Every such pairing is
+/// declared here and checked before a single project command runs: an
+/// option that could not take effect is a usage error at the prompt, not
+/// something discovered after the build has had its side effects, and never
+/// something silently dropped. A new security-sensitive option states its
+/// prerequisite in one of these tables rather than in the code that would
+/// eventually fail to honour it.
+struct Prerequisite {
+    option: &'static str,
+    given: bool,
+    requires: &'static str,
+    met: bool,
+    why: &'static str,
+}
+
+/// Exit 2 on the first unmet prerequisite: an operational error, not a
+/// verification result, because nothing has run yet.
+fn refuse_unmet(rules: &[Prerequisite]) {
+    for rule in rules {
+        if rule.given && !rule.met {
+            eprintln!(
+                "error: {} requires {}; {}",
+                rule.option, rule.requires, rule.why
+            );
+            std::process::exit(2);
+        }
     }
 }
 
