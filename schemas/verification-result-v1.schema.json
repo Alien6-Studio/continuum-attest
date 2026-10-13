@@ -135,6 +135,51 @@
           }
         }
       ]
+    },
+    "trust_material": {
+      "description": "How current the revocations behind this verdict are: the most recently accepted trust bundle, judged by the verifier's own clock, not by trusted time. Absent on emitters that predate trust bundles.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "issuer",
+        "sequence",
+        "valid_until",
+        "judged_by"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "none",
+            "current",
+            "expired"
+          ]
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "valid_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "judged_by": {
+          "const": "local clock"
+        }
+      }
     }
   }
 }

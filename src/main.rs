@@ -1630,6 +1630,29 @@ fn print_verdict(verdict: &attest::verify::ReceiptVerdict, format: &str) {
         if let Some(key) = &verdict.signed_by {
             println!("  signed by: {}", key);
         }
+        if let Some(material) = &verdict.trust_material {
+            match (material.state.as_str(), &material.issuer) {
+                ("none", _) | (_, None) => println!(
+                    "  trust material: no bundle on record; revocations are as current as this \
+                     store's last manual change"
+                ),
+                (state, Some(issuer)) => println!(
+                    "  trust material: bundle {} from {} {} {} ({})",
+                    material.sequence.unwrap_or_default(),
+                    issuer,
+                    if state == "expired" {
+                        "expired at"
+                    } else {
+                        "valid until"
+                    },
+                    material
+                        .valid_until
+                        .map(|t| t.to_string())
+                        .unwrap_or_default(),
+                    material.judged_by
+                ),
+            }
+        }
     }
 
     for warning in &verdict.warnings {

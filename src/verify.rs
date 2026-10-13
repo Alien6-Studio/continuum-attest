@@ -48,6 +48,24 @@ pub struct Check {
     pub detail: String,
 }
 
+/// How current the trust material behind a verdict is. A verifier cannot
+/// know about revocations issued after the last bundle it accepted; this
+/// says where that line is, so a reader can tell what the verdict does
+/// and does not account for. Judged by the verifier's own clock, which is
+/// not trusted time: an attacker who sets that clock back makes expired
+/// material look current, and nothing here claims otherwise.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrustMaterial {
+    /// `none` (no bundle on record), `current`, or `expired`.
+    pub state: String,
+    pub issuer: Option<String>,
+    pub sequence: Option<u64>,
+    pub valid_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// What the state was judged against. Always `local clock`; stated so
+    /// that a reader does not assume trusted time.
+    pub judged_by: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ReceiptVerdict {
     pub receipt: String,
@@ -56,6 +74,10 @@ pub struct ReceiptVerdict {
     pub signed_by: Option<String>,
     /// Non-fatal notices (e.g. a signature by a key revoked after signing).
     pub warnings: Vec<String>,
+    /// Present for receipt-file verdicts; absent on surfaces that have no
+    /// trust store to speak of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_material: Option<TrustMaterial>,
 }
 
 impl ReceiptVerdict {
@@ -126,6 +148,7 @@ pub fn verify_receipt_bytes(
                 checks,
                 signed_by,
                 warnings,
+                trust_material: None,
             });
         }
     }
@@ -182,13 +205,69 @@ pub fn verify_receipt_bytes(
         "pass"
     };
 
+    let trust_material = trust_material(opts, chrono::Utc::now(), &mut warnings);
+
     Ok(ReceiptVerdict {
         receipt: display_path,
         verdict: verdict.to_string(),
         checks,
         signed_by,
         warnings,
+        trust_material: Some(trust_material),
     })
+}
+
+/// Where the revocations this verdict relied on stop being known to be
+/// current. An expired bundle is a warning, not a failure: whether stale
+/// trust material is acceptable is the recipient's policy, and the verdict
+/// states the window so that policy has something to act on.
+fn trust_material(
+    opts: &VerifyOptions,
+    now: chrono::DateTime<chrono::Utc>,
+    warnings: &mut Vec<String>,
+) -> TrustMaterial {
+    let store = opts
+        .trust_store
+        .clone()
+        .unwrap_or_else(|| opts.workspace.join(".attest").join("trust"));
+    let judged_by = "local clock".to_string();
+    let latest = match crate::trust::latest_accepted(&store) {
+        Ok(latest) => latest,
+        Err(err) => {
+            warnings.push(format!(
+                "cannot read the accepted trust bundles in {}: {err:#}; treating the store as \
+                 having none on record",
+                store.join("bundles").display()
+            ));
+            None
+        }
+    };
+    match latest {
+        None => TrustMaterial {
+            state: "none".to_string(),
+            issuer: None,
+            sequence: None,
+            valid_until: None,
+            judged_by,
+        },
+        Some(bundle) => {
+            let expired = now > bundle.valid_until;
+            if expired {
+                warnings.push(format!(
+                    "trust material from {} expired at {} (judged by this machine's clock): \
+                     revocations issued after bundle {} are unknown here",
+                    bundle.issuer.key_id, bundle.valid_until, bundle.sequence
+                ));
+            }
+            TrustMaterial {
+                state: if expired { "expired" } else { "current" }.to_string(),
+                issuer: Some(bundle.issuer.key_id),
+                sequence: Some(bundle.sequence),
+                valid_until: Some(bundle.valid_until),
+                judged_by,
+            }
+        }
+    }
 }
 
 /// Internal-coherence checks on the parsed receipt.

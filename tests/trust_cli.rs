@@ -531,3 +531,91 @@ fn a_handover_is_declared_by_the_outgoing_authority() {
         .code(1)
         .stderr(predicates::str::contains("name the issuer you expect"));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #18: a verdict says how old its trust material is.
+// ---------------------------------------------------------------------------
+
+/// The verdict states the bundle its revocations are current up to, judged
+/// by the local clock and saying so; an expired bundle turns into a
+/// warning, not a failure, and a store with no bundle on record says that
+/// too. Nothing here is fetched.
+#[test]
+fn a_verdict_states_the_period_its_trust_material_covers() {
+    let (producer, key, receipt) = producer_with_signed_receipt();
+    let first = bundle_to(producer.path(), "b1.json", &["--valid-for", "30"]);
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    let trust = recipient.path().join(".attest/trust");
+
+    let verdict = |extra: &[&str]| -> (i32, String, String) {
+        let mut args = vec![
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        let out = attest()
+            .args(&args)
+            .current_dir(producer.path())
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+
+    // Nothing on record yet: said plainly, in text and in the contract.
+    let (_, text, _) = verdict(&[]);
+    assert!(
+        text.contains("trust material: no bundle on record"),
+        "{text}"
+    );
+    let (_, json, _) = verdict(&["--format", "json"]);
+    let record: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    assert_eq!(record["trust_material"]["state"], "none");
+    assert_eq!(record["trust_material"]["judged_by"], "local clock");
+
+    attest()
+        .args(["trust", "import", first.to_str().unwrap(), "--issuer", &key])
+        .current_dir(recipient.path())
+        .assert()
+        .success();
+    let (code, text, stderr) = verdict(&[]);
+    assert_eq!(code, 0);
+    assert!(text.contains(&format!("trust material: bundle")), "{text}");
+    assert!(
+        text.contains(&key) && text.contains("valid until"),
+        "{text}"
+    );
+    assert!(!stderr.contains("expired"), "{stderr}");
+    let (_, json, _) = verdict(&["--format", "json"]);
+    let record: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    assert_eq!(record["trust_material"]["state"], "current");
+    assert_eq!(record["trust_material"]["issuer"], key);
+    assert!(record["trust_material"]["sequence"].is_u64());
+    assert!(record["trust_material"]["valid_until"].is_string());
+
+    // Time passes: the accepted bundle is local state, like trust.toml, so
+    // its window can be moved into the past the way a test moves a clock.
+    let accepted = trust.join("bundles").join(format!("{key}.json"));
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&accepted).unwrap()).unwrap();
+    stored["valid_until"] = serde_json::Value::String("2020-01-01T00:00:00Z".into());
+    std::fs::write(&accepted, serde_json::to_string(&stored).unwrap()).unwrap();
+
+    let (code, text, stderr) = verdict(&[]);
+    assert_eq!(code, 0, "expiry is a warning for policy, not a failure");
+    assert!(text.contains("expired at 2020-01-01"), "{text}");
+    assert!(
+        stderr.contains("expired at 2020-01-01")
+            && stderr.contains("revocations issued after bundle"),
+        "{stderr}"
+    );
+    let (_, json, _) = verdict(&["--format", "json"]);
+    let record: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    assert_eq!(record["trust_material"]["state"], "expired");
+}

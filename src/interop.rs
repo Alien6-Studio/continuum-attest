@@ -428,6 +428,7 @@ pub fn import_statement_file(path: &Path, options: &ImportOptions) -> Result<Rec
         checks,
         signed_by,
         warnings,
+        trust_material: None,
     })
 }
 

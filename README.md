@@ -164,7 +164,12 @@ so it asserts nothing to anyone who does not already trust the runner — and
 revocation, which compares against that time, is no stronger. With
 `--timestamp`, the time comes from an RFC 3161 authority the signer does not
 control, revocation is judged against that, and `attest verify` refuses a
-revoked key's signature that carries no such proof.
+revoked key's signature that carries no such proof. That is the only check
+that uses a time the signer did not choose. Whether a trust bundle has expired
+is judged by the verifier's own clock, and the verdict says so: it states the
+bundle its revocations are current up to, and warns when that bundle has
+expired, because a verifier offline for a year cannot honestly claim to know
+about revocations issued last week.
 
 Attestation is also not compliance. A green `attest verify` says the artifact
 matches the source; it says nothing about whether either is any good.

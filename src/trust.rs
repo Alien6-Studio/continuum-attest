@@ -555,8 +555,9 @@ pub struct ImportReport {
     pub handover_from: Option<(String, u64)>,
 }
 
-/// Every bundle accepted so far, whatever the issuer.
-fn accepted_bundles(trust_dir: &Path) -> Result<Vec<TrustBundle>> {
+/// Every bundle accepted so far, whatever the issuer. Read as local
+/// state, like `trust.toml`: each was verified when it was accepted.
+pub fn accepted_bundles(trust_dir: &Path) -> Result<Vec<TrustBundle>> {
     let dir = accepted_dir(trust_dir);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Ok(Vec::new());
@@ -744,4 +745,12 @@ pub fn import(
     std::fs::create_dir_all(&dir)?;
     write(&bundle, &dir.join(format!("{issuer}.json")))?;
     Ok(report)
+}
+
+/// The most recently accepted bundle, by signed sequence, across issuers:
+/// the point up to which this store's revocations are known to be current.
+pub fn latest_accepted(trust_dir: &Path) -> Result<Option<TrustBundle>> {
+    Ok(accepted_bundles(trust_dir)?
+        .into_iter()
+        .max_by_key(|b| b.sequence))
 }
