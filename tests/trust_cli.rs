@@ -430,3 +430,104 @@ fn a_bundle_does_not_unrevoke_a_local_decision() {
         .assert()
         .stdout(predicates::str::contains(&worker).and(predicates::str::contains("revoked")));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #17: pin who you trust, and make replacing them a deliberate act.
+// ---------------------------------------------------------------------------
+
+/// The authority stepping down names its successor in its own signed
+/// bundle. The recipient, who pinned the old authority, accepts the new
+/// one's first bundle on that basis and is told a handover happened. A
+/// stranger with a well-formed bundle is still a stranger. And a key
+/// rotated out keeps the signatures it made while it was trusted.
+#[test]
+fn a_handover_is_declared_by_the_outgoing_authority() {
+    let (producer, old, receipt) = producer_with_signed_receipt();
+    let new = generate(producer.path(), "builder-next");
+
+    // A successor has to be a key the store already trusts.
+    attest()
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            "x.json",
+            "--key",
+            &old,
+            "--successor",
+            "00000000000000000000000000000000",
+        ])
+        .current_dir(producer.path())
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("not in the trust store"));
+
+    let first = bundle_to(
+        producer.path(),
+        "b1.json",
+        &["--key", &old, "--successor", &new],
+    );
+    attest()
+        .args(["trust", "show", first.to_str().unwrap()])
+        .current_dir(producer.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains(format!("successor    {new}")))
+        .stdout(predicates::str::contains("hands over to"));
+
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    let trust = recipient.path().join(".attest/trust");
+    attest()
+        .args(["trust", "import", first.to_str().unwrap(), "--issuer", &old])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0);
+    assert_eq!(verify_with(producer.path(), &receipt, &trust), 0);
+
+    // The old authority retires: revoked, and the successor issues.
+    attest()
+        .args(["keys", "revoke", &old])
+        .current_dir(producer.path())
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = bundle_to(producer.path(), "b2.json", &["--key", &new]);
+    attest()
+        .args(["trust", "import", second.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains(format!(
+            "handover: {old} named {new}"
+        )))
+        .stdout(predicates::str::contains("revoked"));
+
+    // Rotation did not invalidate what the old key signed while trusted:
+    // the receipt is judged on its own merits, exactly as any revocation.
+    assert_eq!(verify_with(producer.path(), &receipt, &trust), 1);
+    attest()
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--trust-receipt-timestamp",
+        ])
+        .current_dir(producer.path())
+        .assert()
+        .code(0)
+        .stderr(predicates::str::contains("signed by key revoked later"));
+
+    // A stranger: well-formed, self-vouching, never pinned, never named.
+    let stranger = tempfile::tempdir().unwrap();
+    init(stranger.path());
+    let _z = generate(stranger.path(), "stranger");
+    let theirs = bundle_to(stranger.path(), "z.json", &[]);
+    attest()
+        .args(["trust", "import", theirs.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("name the issuer you expect"));
+}

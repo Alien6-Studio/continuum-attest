@@ -112,7 +112,10 @@ whose receipt does not describe it — which is the point.
   until when, and whether a byte of it changed; `attest trust import` takes it
   into their store, naming the issuer they expect the first time, refuses an
   older bundle than the one already accepted, and says which keys arrived and
-  which were revoked. Verification stays offline: trust material travels as a
+  which were revoked. An authority stepping down names its successor in its
+  own signed bundle, so the recipient sees the handover rather than a
+  stranger; a bundle from an authority the recipient revoked is refused
+  whatever it says. Verification stays offline: trust material travels as a
   file, it is never fetched.
 - **Causal ledger.** An append-only Merkle DAG of execution events with
   inclusion proofs, queryable with `attest causal path|chain|stats`.

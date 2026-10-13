@@ -70,6 +70,11 @@ pub struct TrustBundle {
     /// they do not read it as a clock.
     pub sequence: u64,
     pub keys: Vec<BundledKey>,
+    /// The authority this issuer hands over to, if it is stepping down.
+    /// Signed by the issuer, so a recipient learns the successor's key from
+    /// the authority it already trusts rather than from the successor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub successor: Option<Issuer>,
     /// Hex Ed25519 signature by the issuer over [`TrustBundle::signing_bytes`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
@@ -92,6 +97,7 @@ pub fn produce(
     workspace: &Path,
     requested_key: Option<&str>,
     valid_for: Duration,
+    successor: Option<&str>,
 ) -> Result<TrustBundle> {
     let store = KeyStore::new(workspace);
     let signing_key = store.select_signing_key(requested_key)?.context(
@@ -147,6 +153,26 @@ pub fn produce(
         ),
     }
 
+    // A successor is named by the authority stepping down, and has to be
+    // a key that authority already trusts: the handover is a statement
+    // the recipient can check against keys it is being given at the same
+    // time, by the same signature.
+    let successor = match successor {
+        None => None,
+        Some(id) if id == issuer.key_id => bail!("a key cannot be its own successor"),
+        Some(id) => match keys.iter().find(|k| k.id == id) {
+            Some(k) if k.status == KeyStatus::Trusted => Some(Issuer {
+                key_id: k.id.clone(),
+                public_key: k.public_key.clone(),
+            }),
+            Some(_) => bail!("successor {} is revoked; it cannot take over", id),
+            None => bail!(
+                "successor {} is not in the trust store; generate or import it first",
+                id
+            ),
+        },
+    };
+
     let issued_at = Utc::now();
     let mut bundle = TrustBundle {
         schema_version: BUNDLE_SCHEMA_VERSION,
@@ -155,6 +181,7 @@ pub fn produce(
         valid_until: issued_at + valid_for,
         sequence: u64::try_from(issued_at.timestamp()).context("clock reads before 1970")?,
         keys,
+        successor,
         signature: None,
     };
     bundle.keys.sort_by(|a, b| a.id.cmp(&b.id));
@@ -302,6 +329,10 @@ pub fn examine(bundle: &TrustBundle, now: DateTime<Utc>) -> Vec<BundleCheck> {
 
     checks.push(keys_check(bundle));
 
+    if let Some(successor) = &bundle.successor {
+        checks.push(successor_check(bundle, successor));
+    }
+
     checks.push(if bundle.valid_until < bundle.issued_at {
         check(
             "validity",
@@ -401,6 +432,51 @@ fn keys_check(bundle: &TrustBundle) -> BundleCheck {
     }
 }
 
+fn successor_check(bundle: &TrustBundle, successor: &Issuer) -> BundleCheck {
+    if successor.key_id == bundle.issuer.key_id {
+        return check("successor", false, "the issuer names itself as successor");
+    }
+    match key_id_from_hex(&successor.public_key) {
+        Ok(derived) if derived == successor.key_id => {}
+        Ok(derived) => {
+            return check(
+                "successor",
+                false,
+                format!(
+                    "successor claims key id {} but its public key derives to {}",
+                    successor.key_id, derived
+                ),
+            )
+        }
+        Err(err) => return check("successor", false, format!("successor public key: {err}")),
+    }
+    match bundle.keys.iter().find(|k| k.id == successor.key_id) {
+        Some(k) if k.status == KeyStatus::Trusted && k.public_key == successor.public_key => check(
+            "successor",
+            true,
+            format!(
+                "hands over to {}, listed among the trusted",
+                successor.key_id
+            ),
+        ),
+        Some(k) if k.status == KeyStatus::Trusted => check(
+            "successor",
+            false,
+            "the successor's key differs from the key listed under its id",
+        ),
+        Some(_) => check(
+            "successor",
+            false,
+            "the successor is revoked by this very bundle",
+        ),
+        None => check(
+            "successor",
+            false,
+            "the successor is not among the keys the bundle vouches for",
+        ),
+    }
+}
+
 /// What `attest trust show` reports, in a shape a machine can read.
 #[derive(Debug, Serialize)]
 pub struct BundleReport {
@@ -411,6 +487,8 @@ pub struct BundleReport {
     pub valid_until: DateTime<Utc>,
     pub sequence: u64,
     pub keys: Vec<BundledKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successor: Option<Issuer>,
     pub checks: Vec<BundleCheck>,
 }
 
@@ -429,6 +507,7 @@ pub fn report(path: &Path, bundle: &TrustBundle, now: DateTime<Utc>) -> BundleRe
         valid_until: bundle.valid_until,
         sequence: bundle.sequence,
         keys: bundle.keys.clone(),
+        successor: bundle.successor.clone(),
         checks,
     }
 }
@@ -470,6 +549,26 @@ pub struct ImportReport {
     /// True when the bundle was already the accepted one; nothing was
     /// written.
     pub already_current: bool,
+    /// Set when a first bundle from this issuer was accepted because an
+    /// already pinned authority named it as successor: that authority's
+    /// key id, and the sequence of the bundle that said so.
+    pub handover_from: Option<(String, u64)>,
+}
+
+/// Every bundle accepted so far, whatever the issuer.
+fn accepted_bundles(trust_dir: &Path) -> Result<Vec<TrustBundle>> {
+    let dir = accepted_dir(trust_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    let mut bundles = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "json") {
+            bundles.push(read(&path)?);
+        }
+    }
+    Ok(bundles)
 }
 
 /// Import a bundle into the workspace's trust store, or refresh from a
@@ -499,6 +598,19 @@ pub fn import(
     let store = KeyStore::new(workspace);
     let trust_dir = store.trust_dir();
     let issuer = bundle.issuer.key_id.clone();
+    // An authority this store has revoked does not get to update it,
+    // however well-formed its bundle and whoever once pinned it. Its key
+    // may be in someone else's hands; that is what revocation means.
+    let local_policy = TrustPolicy::load(&trust_dir)?;
+    if local_policy
+        .entry(&issuer)
+        .is_some_and(|entry| entry.status == KeyStatus::Revoked)
+    {
+        bail!(
+            "bundle is issued by {}, which this store has revoked; a revoked authority cannot update it",
+            issuer
+        );
+    }
     if let Some(expected) = expected_issuer {
         if expected != issuer {
             bail!(
@@ -509,12 +621,30 @@ pub fn import(
         }
     }
     let previous = accepted_bundle(&trust_dir, &issuer)?;
+    // A first bundle from an unknown issuer is accepted on one of two
+    // grounds only: the recipient named that issuer, or an authority the
+    // recipient already accepted named it as successor, in a bundle that
+    // also vouched for its key. Anything else is a stranger.
+    let mut handover_from = None;
     match &previous {
-        None if expected_issuer.is_none() => bail!(
-            "first bundle from issuer {}: name the issuer you expect with --issuer <KEY_ID>, \
-             obtained from the producer through a channel other than this file",
-            issuer
-        ),
+        None if expected_issuer.is_none() => {
+            let predecessor = accepted_bundles(&trust_dir)?.into_iter().find(|accepted| {
+                accepted
+                    .successor
+                    .as_ref()
+                    .is_some_and(|s| s.key_id == issuer && s.public_key == bundle.issuer.public_key)
+            });
+            match predecessor {
+                Some(predecessor) => {
+                    handover_from = Some((predecessor.issuer.key_id.clone(), predecessor.sequence));
+                }
+                None => bail!(
+                    "first bundle from issuer {}: name the issuer you expect with --issuer <KEY_ID>, \
+                     obtained from the producer through a channel other than this file",
+                    issuer
+                ),
+            }
+        }
         None => {}
         Some(previous) if bundle.sequence < previous.sequence => bail!(
             "bundle sequence {} is older than the one already accepted from {} (sequence {}); \
@@ -540,6 +670,7 @@ pub fn import(
         issuer: issuer.clone(),
         sequence: bundle.sequence,
         valid_until: Some(bundle.valid_until),
+        handover_from,
         ..ImportReport::default()
     };
     if previous

@@ -437,6 +437,13 @@ enum TrustCommands {
 
         #[arg(
             long,
+            value_name = "KEY_ID",
+            help = "Hand over to this trusted key: recipients accept its first bundle on the strength of this one"
+        )]
+        successor: Option<String>,
+
+        #[arg(
+            long,
             value_name = "DIR",
             help = "Workspace holding .attest/ (default: current directory)"
         )]
@@ -1221,6 +1228,7 @@ fn handle_trust(action: TrustCommands) -> i32 {
             output,
             key,
             valid_for,
+            successor,
             workspace,
         } => {
             let workspace = workspace
@@ -1231,10 +1239,11 @@ fn handle_trust(action: TrustCommands) -> i32 {
                     std::process::exit(2);
                 });
             let validity = chrono::Duration::days(i64::from(valid_for));
-            match attest::trust::produce(&workspace, key.as_deref(), validity).and_then(|bundle| {
-                attest::trust::write(&bundle, std::path::Path::new(&output))?;
-                Ok(bundle)
-            }) {
+            match attest::trust::produce(&workspace, key.as_deref(), validity, successor.as_deref())
+                .and_then(|bundle| {
+                    attest::trust::write(&bundle, std::path::Path::new(&output))?;
+                    Ok(bundle)
+                }) {
                 Ok(bundle) => {
                     eprintln!(
                         "bundle issued by {} with {} keys, valid until {}",
@@ -1277,6 +1286,13 @@ fn handle_trust(action: TrustCommands) -> i32 {
                             report.sequence, report.issuer
                         );
                         return 0;
+                    }
+                    if let Some((predecessor, sequence)) = &report.handover_from {
+                        println!(
+                            "handover: {predecessor} named {} as its successor in bundle {sequence}; \
+                             accepting this first bundle from {} on that basis",
+                            report.issuer, report.issuer
+                        );
                     }
                     for (id, name, status) in &report.added {
                         println!("added    {id}  {name:<20} {status}");
@@ -1336,6 +1352,9 @@ fn handle_trust(action: TrustCommands) -> i32 {
                 println!("  issued       {}", report.issued_at);
                 println!("  valid until  {}", report.valid_until);
                 println!("  sequence     {}", report.sequence);
+                if let Some(successor) = &report.successor {
+                    println!("  successor    {}", successor.key_id);
+                }
                 println!("  keys");
                 for key in &report.keys {
                     let revoked = key

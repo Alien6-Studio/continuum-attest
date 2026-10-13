@@ -19,6 +19,8 @@
 
 use std::path::PathBuf;
 
+use predicates::prelude::*;
+
 use attest::hashing::{hash_outputs, output_manifest};
 
 // ---------------------------------------------------------------------------
@@ -1270,6 +1272,112 @@ fn forging_freshness_by_replaying_an_older_bundle_is_refused() {
         .assert()
         .code(1)
         .stderr(predicates::str::contains("cannot go backwards"));
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// Revoking an authority is what a recipient does when its key may be in
+/// someone else's hands. Whoever holds that key can still produce a
+/// bundle that is well formed, newer than anything accepted, signed by an
+/// issuer the recipient once pinned, and listing a key of their own as
+/// trusted. The local revocation is the only thing that stops it, so an
+/// update from a revoked authority is refused before its contents are
+/// looked at.
+#[test]
+fn forging_a_trust_update_with_a_revoked_authority_is_refused() {
+    let producer = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(producer.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |dir: &std::path::Path, name: &str| {
+        let out = attest()
+            .current_dir(dir)
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let bundle = |dir: &std::path::Path, file: &str, key: &str, extra: &[&str]| {
+        let path = dir.join(file);
+        let mut args = vec![
+            "trust",
+            "bundle",
+            "--output",
+            path.to_str().unwrap(),
+            "--key",
+            key,
+        ];
+        args.extend_from_slice(extra);
+        attest().current_dir(dir).args(&args).assert().success();
+        path
+    };
+    let old = generate(producer.path(), "release");
+    let new = generate(producer.path(), "release-next");
+    let first = bundle(producer.path(), "b1.json", &old, &["--successor", &new]);
+
+    // The theft: a copy of the producer's store, private key included,
+    // taken before the revocation.
+    let thief = tempfile::tempdir().unwrap();
+    copy_tree(
+        &producer.path().join(".attest"),
+        &thief.path().join(".attest"),
+    );
+
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &old])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = bundle(producer.path(), "b2.json", &new, &[]);
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", first.to_str().unwrap(), "--issuer", &old])
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", second.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // The forgery: the stolen, now revoked, authority vouches for a key
+    // of the thief's own, in a bundle newer than anything accepted.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let planted = generate(thief.path(), "planted");
+    let forged = bundle(thief.path(), "b3.json", &old, &[]);
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", forged.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("revoked authority cannot update"));
+    attest()
+        .current_dir(recipient.path())
+        .args(["keys", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&planted).not());
 }
 
 // ---------------------------------------------------------------------------

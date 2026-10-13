@@ -201,6 +201,12 @@ mutate "an older bundle than the accepted one is a replay" src/trust.rs \
 assert s.count(old) == 1, "bundle sequence check moved"
 new = s.replace(old, "Some(previous) if false && bundle.sequence < previous.sequence => bail!(")'
 
+mutate "a revoked authority cannot update the store" src/trust.rs \
+  security_invariants forging_a_trust_update_with_a_revoked_authority_is_refused \
+  'old = ".is_some_and(|entry| entry.status == KeyStatus::Revoked)"
+assert s.count(old) == 1, "revoked-issuer check moved"
+new = s.replace(old, ".is_some_and(|entry| false && entry.status == KeyStatus::Revoked)")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());
