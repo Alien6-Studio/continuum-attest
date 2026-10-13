@@ -202,7 +202,7 @@ hardening that protects private keys is Unix-specific and has no Windows
 equivalent yet, so a Windows build would write key material with inherited
 ACLs.
 
-Building from source requires Rust **1.88** or later (the MSRV is declared in
+Building from source requires Rust **1.89** or later (the MSRV is declared in
 `Cargo.toml` and tested in CI):
 
 ```console

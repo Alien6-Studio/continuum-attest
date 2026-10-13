@@ -73,7 +73,7 @@ fn a_token_for_other_data_is_refused() {
     let err = parse_token(&token(), &wrong).expect_err("imprint mismatch");
     assert!(
         matches!(err, TimestampError::ImprintMismatch),
-        "expected an imprint mismatch, got {err:?}"
+        "expected TimestampError::ImprintMismatch, got another variant"
     );
 }
 
@@ -163,7 +163,7 @@ fn a_certificate_that_did_not_issue_the_signer_is_refused() {
     let err = verify_token(&token(), &imprint(), &[unrelated_root()]).expect_err("wrong issuer");
     assert!(
         matches!(err, TimestampError::UntrustedAuthority),
-        "expected an untrusted authority, got {err:?}"
+        "expected TimestampError::UntrustedAuthority, got another variant"
     );
 }
 

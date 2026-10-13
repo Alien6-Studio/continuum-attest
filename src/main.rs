@@ -2157,11 +2157,9 @@ async fn handle_image_config(show: bool, test_cosign: bool) -> Result<()> {
             config.verify_transparency_log
         );
         println!("Enforcement level: {:?}", config.enforcement_level);
-        println!("Trusted keys: {} configured", config.trusted_keys.len());
-        println!(
-            "   Trusted OIDC issuers: {} configured",
-            config.trusted_oidc_issuers.len()
-        );
+        // Not printed: the trusted key and issuer lists. This shows the
+        // default configuration, where both are empty, and a line about
+        // trusted keys next to a key count reads as more than it is.
     }
 
     if test_cosign {

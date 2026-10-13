@@ -10,9 +10,10 @@ authors = ["Alien6 <contact@alien6.com>"]
 description = "Verifiable CI/CD with cryptographic attestation"
 # Minimum supported Rust version, verified in CI against the committed
 # Cargo.lock. Determined by the locked dependency graph, not by this
-# crate's own syntax: `time`, `globset` and the `icu_*` family declare
-# 1.88. Raising it is a deliberate decision, not a side effect of a bump.
-rust-version = "1.88"
+# crate's own syntax: `uuid` 1.27+ declares 1.89, `time`, `globset` and
+# the `icu_*` family 1.88. Raising it is a deliberate decision, not a side
+# effect of a bump: 1.88 -> 1.89 was decided for 0.2 to take uuid 1.28.
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/Alien6-Studio/continuum-attest"
 homepage = "https://attest.continuu.ms"

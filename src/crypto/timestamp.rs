@@ -68,6 +68,12 @@ const OID_MESSAGE_DIGEST: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0
 /// Default timestamp authority. Overridable, and deliberately so: a single
 /// hard-coded authority would be a single point of failure for a property
 /// the whole product rests on.
+/// Plain HTTP, on purpose. DigiCert's authority does not listen on 443
+/// (checked 2026-10-13: connection refused), and RFC 3161 does not need
+/// it to: the token is a CMS signature over the imprint, verified against
+/// a pinned issuing certificate, so nothing on the path can alter it, and
+/// the imprint is a hash of a signature, not a secret. Code scanning
+/// flags the scheme; that finding is accepted for this constant.
 pub const DEFAULT_TSA_URL: &str = "http://timestamp.digicert.com";
 
 /// Refuse anything larger than this from a timestamp authority. Tokens are a
