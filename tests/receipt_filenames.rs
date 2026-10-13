@@ -20,6 +20,7 @@ fn make_receipt(discriminator: u64) -> Receipt {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     }
 }
 

@@ -43,6 +43,12 @@ pub struct Receipt {
     /// signature, not from ours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_token: Option<String>,
+    /// Which isolation controls were in force for this run, control by
+    /// control, and which were not. Absent on receipts written before it
+    /// existed; those say nothing about isolation, which is the truth.
+    /// Inside the signed bytes, like every other claim the receipt makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<crate::sandbox::IsolationReport>,
 }
 
 /// Result of a double-build reproducibility check attached to a receipt.
@@ -178,6 +184,7 @@ mod tests {
             reproducibility: None,
             provenance: None,
             timestamp_token: None,
+            isolation: None,
         }
     }
 

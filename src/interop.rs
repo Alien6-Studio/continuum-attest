@@ -765,6 +765,7 @@ mod tests {
             reproducibility: None,
             provenance: None,
             timestamp_token: None,
+            isolation: None,
         }
     }
 

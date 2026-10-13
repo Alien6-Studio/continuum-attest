@@ -358,6 +358,19 @@ impl<'a> Executor<'a> {
             .record_causal_events(pipeline, &step_results, &pipeline_hash)
             .await?;
 
+        // What this run can claim about isolation: derived from the sandbox
+        // that ran the steps, or the absence of one, never from the mode's
+        // name. Capsule steps are listed apart, under their own controls.
+        let mut isolation = match &self.sandbox {
+            Some(sandbox) => sandbox.isolation_report(self.config.hermetic_env),
+            None => crate::sandbox::unisolated_report(self.config.hermetic_env),
+        };
+        isolation.capsule_steps = step_results
+            .iter()
+            .filter(|s| s.capsule_hash.is_some())
+            .map(|s| s.name.clone())
+            .collect();
+
         let mut receipt = Receipt {
             schema_version: Some(crate::storage::RECEIPT_SCHEMA_VERSION),
             pipeline_hash,
@@ -372,6 +385,7 @@ impl<'a> Executor<'a> {
             reproducibility: None,
             provenance: Some(provenance),
             timestamp_token: None,
+            isolation: Some(isolation),
         };
 
         // Sign the receipt based on mode configuration

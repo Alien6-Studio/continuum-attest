@@ -193,6 +193,7 @@ fn pipeline_workspace_with_receipt(dir: &Path) -> std::path::PathBuf {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
     let receipt_path = dir.join("receipt.yaml");
     std::fs::write(

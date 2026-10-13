@@ -111,6 +111,7 @@ async fn test_storage_functionality() -> Result<()> {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     let receipt_path = storage.save_receipt(&receipt).await?;

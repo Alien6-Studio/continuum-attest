@@ -176,6 +176,15 @@ say so here than let you discover them during an audit:
   receipts, even when its private half is local. A policy with a status
   outside `trusted`/`revoked`, or naming a key whose file is missing or
   holds another key, does not load at all.
+- **"Isolated" is a list, not a word.** `--verify` runs steps under process
+  isolation, which enforces memory and open-file limits and timeouts when they
+  are configured, and nothing else: no network control, no filesystem control,
+  no capability drop. A container (`--container-image`) adds `--network none`
+  and declared-only environment; a strict container adds a seccomp profile,
+  dropped capabilities and a read-only root; a capsule has its own. Every
+  receipt carries an `isolation` block naming each control as enforced, not
+  enforced or not available on that platform, so a recipient reads what was
+  in force rather than inferring it from a mode's name.
 - **Revoking a key does not reach anyone else.** `attest keys revoke` writes to
   your local trust store. A third party verifying your receipt reads their own
   copy, and nothing tells them it is out of date — there is no distribution

@@ -349,6 +349,7 @@ fn write_signing_receipt(
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     if request.sign_receipt {

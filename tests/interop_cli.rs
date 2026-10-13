@@ -410,6 +410,7 @@ fn regenerate_fixtures() {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     let keypair = attest::crypto::sign::AttestKeypair::from_signing_key(signing_key);

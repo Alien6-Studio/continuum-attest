@@ -700,6 +700,7 @@ fn the_signature_covers_the_causal_root_and_the_events() {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
     let signed = receipt_signing_bytes(&base).expect("canonical bytes");
 
@@ -1669,6 +1670,61 @@ fn forging_trust_with_a_well_formed_bundle_from_an_unpinned_authority_is_refused
         .assert()
         .success()
         .stdout(predicates::str::contains(&their_key).not());
+}
+
+/// Process isolation has no network control, and a receipt that said it
+/// did would be the forgery: a recipient reading "network: enforced"
+/// would believe a build could not have fetched anything, when it could.
+/// So the step reaches a listener on this machine, under --verify, and
+/// the receipt is held to saying that it could.
+#[test]
+fn forging_isolation_by_claiming_a_network_control_process_isolation_lacks_is_refused() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = std::thread::spawn(move || listener.accept().is_ok());
+
+    let pipeline = format!(
+        "version: \"0.1\"\n\
+         name: reach\n\
+         steps:\n  \
+           reach:\n    \
+             run: \"python3 -c 'import socket; socket.create_connection((\\\"127.0.0.1\\\", {port}), timeout=10).close()'\"\n    \
+             inputs: []\n    \
+             outputs: []\n    \
+             cache: false\n"
+    );
+    let dir = workspace(&pipeline);
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--verify"])
+        .assert()
+        .success();
+    assert!(
+        accepted.join().unwrap(),
+        "the step reached the network under --verify; if it had not, the claim below would be wrong the other way"
+    );
+
+    let receipt = run_receipt_yaml(dir.path());
+    let network = receipt["isolation"]["controls"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "network")
+        .expect("a network row");
+    assert_eq!(
+        network["status"], "not-enforced",
+        "the receipt must not claim a control that was not in force"
+    );
+}
+
+fn run_receipt_yaml(dir: &std::path::Path) -> serde_yaml::Value {
+    let path = std::fs::read_dir(dir.join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .expect("a receipt was written");
+    serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
 // ---------------------------------------------------------------------------

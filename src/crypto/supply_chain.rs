@@ -681,6 +681,7 @@ pub fn write_verification_receipt(
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     if options.sign_receipt {

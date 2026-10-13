@@ -233,6 +233,18 @@ assert s.count(old) == 1, "revision no-evidence arm moved"
 new = s.replace(old, """                Ok(None) => CheckResult::skipped(
                     "revision",""")'
 
+mutate "process isolation does not claim a network control" src/sandbox/mod.rs \
+  security_invariants forging_isolation_by_claiming_a_network_control_process_isolation_lacks_is_refused \
+  'old = """                            "network",
+                            NotEnforced,
+                            format!(
+                                "process isolation has no network control"""
+assert s.count(old) == 1, "process-mode network row moved"
+new = s.replace(old, """                            "network",
+                            Enforced,
+                            format!(
+                                "process isolation has no network control""")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

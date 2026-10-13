@@ -27,7 +27,11 @@ enum Commands {
         #[arg(short, long, value_name = "FILE", help = "Pipeline file path")]
         pipeline: Option<String>,
 
-        #[arg(long, help = "Run in isolated environment")]
+        #[arg(
+            long,
+            help = "Run steps under process isolation: resource limits and timeouts are enforced; \
+                    network and filesystem access are not. The receipt lists each control and its state"
+        )]
         verify: bool,
 
         #[arg(long, help = "Cryptographically sign results")]
