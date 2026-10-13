@@ -279,7 +279,7 @@ fn pre_versioning_receipt_still_verifies() {
 fn assert_verdict_contract(value: &serde_json::Value) {
     let schema: serde_json::Value =
         serde_json::from_str(attest::verify::VERDICT_JSON_SCHEMA).unwrap();
-    let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
     assert!(validator.is_valid(value), "invalid verdict: {value}");
 }
 
@@ -338,7 +338,7 @@ fn json_contract_rejects_ambiguous_or_malformed_records() {
     let original: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let schema: serde_json::Value =
         serde_json::from_str(attest::verify::VERDICT_JSON_SCHEMA).unwrap();
-    let validator = jsonschema::JSONSchema::compile(&schema).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
     let mut reordered = original.clone();
     reordered["checks"].as_array_mut().unwrap().reverse();
     assert!(

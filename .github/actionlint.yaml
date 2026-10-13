@@ -1,0 +1,7 @@
+# actionlint ships a fixed list of GitHub-hosted runner labels and 1.7.7
+# predates `macos-15-intel`, the Intel macOS runner that replaced macos-13.
+# release.yml and ci.yml build and test on it; declare it here so the
+# linter does not report a label GitHub does serve.
+self-hosted-runner:
+  labels:
+    - macos-15-intel

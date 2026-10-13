@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
+use rand_core::OsRng;
 use std::fs;
 use std::path::Path;
 
@@ -12,7 +12,7 @@ pub struct AttestKeypair {
 
 impl AttestKeypair {
     pub fn generate() -> Self {
-        let mut csprng = OsRng {};
+        let mut csprng = OsRng;
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         Self {

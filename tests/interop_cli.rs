@@ -185,14 +185,16 @@ fn exported_statement_validates_against_slsa_schema() {
             .expect("schema file"),
     )
     .expect("schema JSON");
-    let compiled = jsonschema::JSONSchema::compile(&schema).expect("schema compiles");
+    let compiled = jsonschema::validator_for(&schema).expect("schema compiles");
 
     let statement = decoded_payload(
         &std::fs::read_to_string(fixtures_dir().join("golden.dsse.json")).expect("golden"),
     );
-    let result = compiled.validate(&statement);
-    if let Err(errors) = result {
-        let details: Vec<String> = errors.map(|e| e.to_string()).collect();
+    let details: Vec<String> = compiled
+        .iter_errors(&statement)
+        .map(|e| e.to_string())
+        .collect();
+    if !details.is_empty() {
         panic!("statement does not match SLSA v1 schema: {:?}", details);
     }
 }
@@ -349,7 +351,7 @@ fn regenerate_fixtures() {
 
     // Only the raw 32-byte seed is committed: it carries no PEM framing,
     // so secret scanners never see key-shaped material in the repository.
-    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
     std::fs::create_dir_all(fixtures_dir()).expect("fixtures dir");
     std::fs::write(
         fixtures_dir().join("fixture.seed.hex"),

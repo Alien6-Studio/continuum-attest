@@ -44,7 +44,11 @@ serde_json = "1.0"
 # Crypto & attestation
 blake3 = "1.5"
 ed25519-dalek = { version = "2.0", features = ["rand_core", "pkcs8", "pem"] }
-rand = "0.8"
+# Only an OS-backed CSPRNG is needed, and it has to implement the
+# rand_core trait ed25519-dalek 2 is built on (0.6). A standalone `rand`
+# would pull its own rand_core and could drift to a version the signing
+# stack cannot accept; see the signing-stack group in dependabot.yml.
+rand_core = { version = "0.6", features = ["getrandom"] }
 hex = "0.4"
 toml = "0.8"
 tar = "0.4"
@@ -103,7 +107,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # default-features = false drops the remote $ref resolvers, and with them a
 # second copy of reqwest in the dependency graph. The tests only ever compile
 # local schemas.
-jsonschema = { version = "0.17", default-features = false }
+jsonschema = { version = "0.58", default-features = false }
 assert_cmd = "2.0"
 # Test-only: concurrency harnesses (futures::future::join_all) and glob
 # matching. Both used to sit in [dependencies] without the core ever

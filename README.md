@@ -154,7 +154,8 @@ matches the source; it says nothing about whether either is any good.
 
 ## Install
 
-Linux and macOS, x86-64 and arm64. Windows is not supported: the permission
+Linux and macOS, x86-64 and arm64. Each of the four runs the test suite in CI
+before a release ships a binary for it. Windows is not supported: the permission
 hardening that protects private keys is Unix-specific and has no Windows
 equivalent yet, so a Windows build would write key material with inherited
 ACLs.
