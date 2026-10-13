@@ -58,7 +58,18 @@ pub struct Executor<'a> {
     config: ExecutorConfig,
     sandbox: Option<Sandbox>,
     mode_config: Option<ModeConfig>,
+    /// How to obtain the signing authority, called once every project
+    /// command has finished and not before. Producing evidence and signing
+    /// it are different trust operations: nothing a step runs should share
+    /// the process that holds the key, so the key is not held while steps
+    /// run.
+    key_loader: Option<KeyLoader>,
 }
+
+/// Loads the keypair that signs the receipt and the ledger events. Invoked
+/// after the last step, so a step cannot observe or influence the
+/// authority; a loader that fails fails the run, with no receipt written.
+pub type KeyLoader = Box<dyn FnOnce() -> Result<crate::crypto::sign::AttestKeypair> + Send + Sync>;
 
 impl<'a> Executor<'a> {
     pub fn new(storage: &'a mut Storage, config: ExecutorConfig) -> Result<Self> {
@@ -86,7 +97,25 @@ impl<'a> Executor<'a> {
             config,
             sandbox,
             mode_config,
+            key_loader: None,
         })
+    }
+
+    /// Sign this run's receipt with the authority `loader` produces, loaded
+    /// only once every step has run.
+    pub fn sign_with(&mut self, loader: KeyLoader) {
+        self.key_loader = Some(loader);
+    }
+
+    /// The moment signing authority becomes available: after the steps,
+    /// before the ledger events and the receipt are assembled. Nothing the
+    /// project controls runs past this point.
+    fn load_signing_key(&mut self) -> Result<()> {
+        if let Some(loader) = self.key_loader.take() {
+            let keypair = loader()?;
+            self.storage.set_keypair(keypair);
+        }
+        Ok(())
     }
 
     fn create_default_sandbox_config(config: &ExecutorConfig) -> SandboxConfig {
@@ -346,6 +375,10 @@ impl<'a> Executor<'a> {
             step_results.push(final_step_result);
             completed_steps.insert(step_name);
         }
+
+        // Every project command has completed. Only now does the signing
+        // authority exist in this process.
+        self.load_signing_key()?;
 
         let total_duration = start_time.elapsed();
         let pipeline_hash = self.compute_pipeline_hash(pipeline).await?;

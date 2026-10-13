@@ -12,13 +12,15 @@
 # published file byte for byte, and the publish job recomputes that manifest
 # over what it is about to publish and refuses on any difference.
 #
-#   tools/release-binding.sh attest <key-id>     in the attest-self job
+#   tools/release-binding.sh attest              in the evidence job
 #   tools/release-binding.sh check <receipt>     in the publish job
 #
 # Both run from the repository root with the artifacts under ./artifacts, in
-# the layout actions/download-artifact produces. `check` needs the receipt to
-# be signed by a key in .attest/trust and to carry a timestamp token, and it
-# needs ATTEST to point at a binary it can run.
+# the layout actions/download-artifact produces. `attest` writes an unsigned
+# receipt: the job that produces evidence holds no key, and `attest sign`
+# signs it in the job that does. `check` needs the receipt to be signed by a
+# key in .attest/trust and to carry a timestamp token, and it needs ATTEST to
+# point at a binary it can run.
 set -euo pipefail
 
 ATTEST=${ATTEST:-./target/release/attest}
@@ -30,10 +32,8 @@ RUN_ARGV='["sh","-c","find artifacts -type f | sort | xargs sha256sum"]'
 
 case "${1:-}" in
   attest)
-    key=${2:?key id}
     [ -d artifacts ] || { echo "no ./artifacts to attest" >&2; exit 2; }
-    "$ATTEST" run --wrap --name "$NAME" --input artifacts \
-      --sign --timestamp --key "$key" -- sh -c "$RUN"
+    "$ATTEST" run --wrap --name "$NAME" --input artifacts -- sh -c "$RUN"
     ;;
   check)
     receipt=${2:?receipt path}
@@ -54,7 +54,7 @@ case "${1:-}" in
     echo "release artifacts match the attested manifest $actual"
     ;;
   *)
-    echo "usage: $0 attest <key-id> | check <receipt>" >&2
+    echo "usage: $0 attest | check <receipt>" >&2
     exit 2
     ;;
 esac

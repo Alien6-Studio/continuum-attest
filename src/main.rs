@@ -105,6 +105,43 @@ enum Commands {
         command: Vec<String>,
     },
 
+    /// Sign a receipt produced elsewhere, in a process that ran no project command
+    Sign {
+        #[arg(value_name = "RECEIPT", help = "Unsigned receipt file")]
+        receipt: String,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Signing key id (see 'attest keys list'); the only private key if omitted"
+        )]
+        key: Option<String>,
+
+        #[arg(long, help = "Request an RFC 3161 timestamp over the signature")]
+        timestamp: bool,
+
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Timestamp authority to use with --timestamp"
+        )]
+        tsa: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Write the signed receipt here instead of in place"
+        )]
+        output: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Workspace holding .attest/ (default: current directory)"
+        )]
+        workspace: Option<String>,
+    },
+
     /// Key management and trust store
     Keys {
         #[command(subcommand)]
@@ -996,6 +1033,47 @@ async fn main() -> Result<()> {
                 format,
             );
             std::process::exit(code);
+        }
+
+        Commands::Sign {
+            receipt,
+            key,
+            timestamp,
+            tsa,
+            output,
+            workspace,
+        } => {
+            refuse_unmet(&[Prerequisite {
+                option: "--tsa",
+                given: tsa.is_some(),
+                requires: "--timestamp",
+                met: timestamp,
+                why: "an authority was named but no timestamp was requested",
+            }]);
+            let workspace = workspace
+                .map(std::path::PathBuf::from)
+                .map_or_else(std::env::current_dir, Ok)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot determine working directory: {e}");
+                    std::process::exit(2);
+                });
+            let tsa_url = timestamp.then(|| {
+                tsa.clone()
+                    .unwrap_or_else(|| attest::crypto::timestamp::DEFAULT_TSA_URL.to_string())
+            });
+            match attest::core::sign_receipt_file(
+                &workspace,
+                std::path::Path::new(&receipt),
+                key.as_deref(),
+                tsa_url.as_deref(),
+                output.as_deref().map(std::path::Path::new),
+            ) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    std::process::exit(2);
+                }
+            }
         }
 
         Commands::Trust { action } => std::process::exit(handle_trust(action)),

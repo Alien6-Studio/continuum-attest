@@ -74,7 +74,9 @@ Three more run in CI:
   receipt with `attest run --verify`. Reproduce it the same way. It runs
   unsigned: the signing key lives in a protected environment that only a
   tagged release can reach, so no pull request, from a fork or not, can sign
-  anything.
+  anything. A release signs the same way, in a job of its own: the job that
+  runs project commands holds no key, and the job that holds the key runs
+  `attest sign` on receipts it did not produce.
 
 ## Things that will get a PR sent back
 

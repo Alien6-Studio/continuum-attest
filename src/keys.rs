@@ -216,8 +216,22 @@ impl KeyStore {
         }
     }
 
+    /// Where private keys live: `.attest/keys` in the workspace, or the
+    /// directory named by `ATTEST_KEYS_DIR`. The workspace is readable by
+    /// every build step; a key that must stay out of the build's reach is
+    /// kept elsewhere and pointed at.
     pub fn keys_dir(&self) -> PathBuf {
-        self.workspace.join(".attest").join("keys")
+        match std::env::var_os("ATTEST_KEYS_DIR") {
+            Some(dir) if !dir.is_empty() => {
+                let dir = PathBuf::from(dir);
+                if dir.is_absolute() {
+                    dir
+                } else {
+                    self.workspace.join(dir)
+                }
+            }
+            _ => self.workspace.join(".attest").join("keys"),
+        }
     }
 
     pub fn trust_dir(&self) -> PathBuf {

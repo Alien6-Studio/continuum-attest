@@ -189,15 +189,12 @@ jobs:
           path: ${{ steps.pkg.outputs.crate }}
           retention-days: 7
 
-  attest-self:
-    name: Attest the tagged build
-    # The key lives in this environment, not in repository secrets. Only a
-    # job that declares the environment can read it, which means a tag is the
-    # only path to a signature -- and protection rules on the environment can
-    # require a human to approve even that.
-    environment: release
-    # After every artifact exists: this job attests the project's own build
-    # and, separately, the exact set of files the release will publish.
+  # Produces every piece of evidence and holds no key. The project's own
+  # pipeline runs here, unsigned, and the published artifact set is wrapped
+  # here, unsigned: a job that runs project commands never has signing
+  # authority, so nothing a build step does can reach it.
+  evidence:
+    name: Produce the release evidence
     needs: [gates, build, crate, sbom]
     runs-on: ubuntu-latest
     steps:
@@ -206,6 +203,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
           toolchain: "1.98.1"
@@ -214,6 +212,56 @@ jobs:
 
       - run: cargo build --release --locked
 
+      - name: Run and verify the attested pipeline
+        run: |
+          ./target/release/attest run --verify
+          ./target/release/attest verify .attest/receipts/*.yaml \
+            --recompute --trust-store .attest/trust --check-signatures false --format text
+
+      # One receipt over every file the release publishes: binaries,
+      # checksums, build-info, SBOM, source package. Its input manifest is
+      # what the publish job recomputes over the bytes it is about to
+      # publish; a release whose artifacts differ from this set is refused.
+      - name: Attest the published artifact set
+        run: |
+          ls -R artifacts
+          tools/release-binding.sh attest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: receipts-unsigned
+          path: .attest/receipts/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  # Holds the key and runs nothing the project controls. The key lives in
+  # this environment, not in repository secrets: only a job that declares
+  # the environment can read it, which means a tag is the only path to a
+  # signature, and protection rules on the environment can require a human
+  # to approve even that. The verifier is built before the key is
+  # installed; after it, the only commands are attest's own.
+  sign:
+    name: Sign the release evidence
+    environment: release
+    needs: evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - run: cargo build --release --locked
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: receipts-unsigned
+          path: .attest/receipts
+
+      # Outside the workspace, on purpose: the key is never a file a build
+      # step could have read, even though no build step runs here.
       - name: Install signing key
         env:
           SIGNING_KEY: ${{ secrets.ATTEST_SIGNING_KEY }}
@@ -223,31 +271,26 @@ jobs:
             echo "ATTEST_SIGNING_KEY is required for a release; refusing to ship unsigned." >&2
             exit 1
           fi
-          mkdir -p .attest/keys
-          printf '%s' "$SIGNING_KEY" | base64 -d > ".attest/keys/$KEY_ID.key"
-          grep -q "BEGIN PRIVATE KEY" ".attest/keys/$KEY_ID.key"
-          chmod 600 ".attest/keys/$KEY_ID.key"
+          mkdir -p "$RUNNER_TEMP/keys"
+          chmod 700 "$RUNNER_TEMP/keys"
+          printf '%s' "$SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/keys/$KEY_ID.key"
+          grep -q "BEGIN PRIVATE KEY" "$RUNNER_TEMP/keys/$KEY_ID.key"
+          chmod 600 "$RUNNER_TEMP/keys/$KEY_ID.key"
 
       # --timestamp here and not in ci.yml. A release receipt is long-lived
       # evidence and is exactly what a timestamp is for; a pull request
       # receipt is not, and making every push depend on a third party's
       # uptime would trade a real cost for no benefit.
-      - name: Run and verify the attested pipeline
+      - name: Sign and timestamp every receipt
+        env:
+          ATTEST_KEYS_DIR: ${{ runner.temp }}/keys
         run: |
-          ./target/release/attest run --verify --sign --timestamp \
-            --key "${{ vars.ATTEST_KEY_ID }}"
+          set -euo pipefail
+          for receipt in .attest/receipts/*.yaml; do
+            ./target/release/attest sign "$receipt" --key "${{ vars.ATTEST_KEY_ID }}" --timestamp
+          done
           ./target/release/attest verify .attest/receipts/*.yaml \
-            --recompute --trust-store .attest/trust --format text
-
-      # One receipt over every file the release publishes: binaries,
-      # checksums, build-info, SBOM, source package. Its input manifest is
-      # what the publish job recomputes over the bytes it is about to
-      # publish; a release whose artifacts differ from this set is refused.
-      - name: Attest the published artifact set
-        run: |
-          ls -R artifacts
-          tools/release-binding.sh attest "${{ vars.ATTEST_KEY_ID }}"
-          tools/release-binding.sh check .attest/receipts/receipt_*_release-artifacts_*.yaml
+            --trust-store .attest/trust --require signature,timestamp --format text
 
       # include-hidden-files: `.attest/` is a dotted directory and the action
       # skips hidden paths by default, so the receipts silently never
@@ -283,7 +326,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [build, crate, attest-self, sbom]
+    needs: [build, crate, sign, sbom]
     runs-on: ubuntu-latest
     # Tags only. Without this, `workflow_dispatch` would try to publish a
     # release from a branch, so there would be no way to rehearse the whole
@@ -314,7 +357,9 @@ jobs:
       # The receipts are evidence about ./artifacts, not part of the set the
       # evidence covers; they move aside before the set is checked.
       - name: Separate the evidence from what it describes
-        run: mv artifacts/receipts receipts
+        run: |
+          mv artifacts/receipts receipts
+          rm -rf artifacts/receipts-unsigned
 
       # The binary that checks the release is the release's own, from the
       # tarball about to be published, not a fresh build of unknown origin.

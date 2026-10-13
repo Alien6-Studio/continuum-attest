@@ -539,19 +539,17 @@ impl AttestCore {
         info!("Using operation mode: {}", self.mode_config.mode);
 
         let mut storage = Storage::new(&workspace)?;
-        if config.sign_results {
-            let store = crate::keys::KeyStore::new(&workspace);
-            match store.select_signing_key(key)? {
-                Some(signing_key) => storage.set_keypair(
-                    crate::crypto::sign::AttestKeypair::from_signing_key(signing_key),
-                ),
-                // No managed key: fall back to the legacy auto-generated
-                // raw keypair under .attest/keys/.
-                None => storage.load_keypair(true)?,
-            }
-        }
-
+        let sign_results = config.sign_results;
         let mut executor = crate::executor::Executor::new(&mut storage, config)?;
+        if sign_results {
+            // Not loaded here. The executor asks for the authority once the
+            // last step has run; until then no key is held by this process.
+            let key_workspace = workspace.clone();
+            let key_id = key.map(str::to_string);
+            executor.sign_with(Box::new(move || {
+                load_signing_keypair(&key_workspace, key_id.as_deref())
+            }));
+        }
         let receipt = match executor.run(&pipeline).await {
             Ok(receipt) => receipt,
             Err(err) => {
@@ -893,6 +891,82 @@ fn cleanup_dirs(dirs: &[std::path::PathBuf]) {
 /// Starter pipeline written by `attest init` when no attest.yaml exists.
 /// Attach a timestamp token when the run asked for one.
 ///
+/// The signing authority for a workspace: the managed key named by `key`,
+/// the only managed key if none is named, else the legacy raw keypair under
+/// `.attest/keys/`. Called at the moment signing is about to happen, never
+/// earlier.
+pub fn load_signing_keypair(
+    workspace: &std::path::Path,
+    key: Option<&str>,
+) -> Result<crate::crypto::sign::AttestKeypair> {
+    let store = crate::keys::KeyStore::new(workspace);
+    match store.select_signing_key(key)? {
+        Some(signing_key) => Ok(crate::crypto::sign::AttestKeypair::from_signing_key(
+            signing_key,
+        )),
+        None => crate::crypto::sign::AttestKeypair::load_or_generate(&store.keys_dir()),
+    }
+}
+
+/// `attest sign`: sign an unsigned receipt, and optionally timestamp the
+/// signature, in a process that ran no project command. This is the
+/// signing boundary for a release: the job that builds holds no key, the
+/// job that holds the key builds nothing.
+///
+/// Exit codes: 0 signed, 1 the receipt was refused (already signed, or not
+/// a receipt), 2 operational error.
+pub fn sign_receipt_file(
+    workspace: &std::path::Path,
+    receipt_path: &std::path::Path,
+    key: Option<&str>,
+    tsa: Option<&str>,
+    output: Option<&std::path::Path>,
+) -> Result<i32> {
+    let bytes =
+        crate::verify::read_bounded(receipt_path, crate::verify::MAX_RECEIPT_BYTES, "receipt")?;
+    let receipt: crate::storage::Receipt = match serde_yaml::from_slice(&bytes) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            eprintln!("error: {} is not a receipt: {err}", receipt_path.display());
+            return Ok(1);
+        }
+    };
+    if let Some(signer) = &receipt.signer_public_key {
+        eprintln!(
+            "error: {} is already signed by {}; a signature is not re-issued, verify it instead",
+            receipt_path.display(),
+            signer
+        );
+        return Ok(1);
+    }
+
+    let mut storage = Storage::new(workspace)?;
+    storage.set_keypair(load_signing_keypair(workspace, key)?);
+    let receipt = storage.sign_receipt(&receipt)?;
+    let receipt = match timestamp_if_requested(&storage, receipt, tsa) {
+        Ok(receipt) => receipt,
+        Err(code) => return Ok(code),
+    };
+
+    let destination = output.unwrap_or(receipt_path);
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        destination
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id()
+    ));
+    std::fs::write(&temporary, serde_yaml::to_string(&receipt)?)?;
+    std::fs::rename(&temporary, destination)?;
+    println!("{}", destination.display());
+    Ok(0)
+}
+
 /// A failure here fails the run. Someone who passed `--timestamp` wants
 /// third-party evidence of when they signed; quietly handing them a receipt
 /// without it would leave them believing they have a guarantee they do not.

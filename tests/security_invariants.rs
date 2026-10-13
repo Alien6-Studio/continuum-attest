@@ -1727,6 +1727,57 @@ fn run_receipt_yaml(dir: &std::path::Path) -> serde_yaml::Value {
     serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// Signing authority used to be loaded before the first step ran, so every
+/// step ran in a process that held the key. A step cannot be shown to have
+/// read memory it should not; what can be shown is the moment the key is
+/// loaded. Here a step removes the key from the workspace while it runs.
+/// If the authority is loaded only after the steps, signing has nothing
+/// to load and the run fails with no receipt; if it had been loaded
+/// before, the receipt would come out signed as if nothing had happened.
+#[test]
+fn forging_a_signature_with_authority_available_during_the_build_is_refused() {
+    let dir = workspace(ONE_STEP);
+    let key = {
+        let out = attest()
+            .current_dir(dir.path())
+            .args(["keys", "generate", "--name", "release"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        "version: \"0.1\"\n\
+         name: thief\n\
+         steps:\n  \
+           take:\n    \
+             run: \"rm -f .attest/keys/*.key\"\n    \
+             inputs: []\n    \
+             outputs: []\n    \
+             cache: false\n",
+    )
+    .unwrap();
+
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--sign", "--key", &key])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no private key"));
+    let written = std::fs::read_dir(dir.path().join(".attest/receipts"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "yaml"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        written, 0,
+        "no receipt may be signed by an authority the build had"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

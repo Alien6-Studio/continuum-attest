@@ -245,6 +245,15 @@ new = s.replace(old, """                            "network",
                             format!(
                                 "process isolation has no network control""")'
 
+mutate "signing authority is loaded after the steps" src/executor/mod.rs \
+  security_invariants forging_a_signature_with_authority_available_during_the_build_is_refused \
+  'old = """        let start_time = Instant::now();
+        let mut provenance = crate::provenance::collect("""
+assert s.count(old) == 1, "start of Executor::run moved"
+new = s.replace(old, """        let start_time = Instant::now();
+        self.load_signing_key()?;
+        let mut provenance = crate::provenance::collect(""")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

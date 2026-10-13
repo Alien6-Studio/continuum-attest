@@ -176,6 +176,14 @@ say so here than let you discover them during an audit:
   receipts, even when its private half is local. A policy with a status
   outside `trusted`/`revoked`, or naming a key whose file is missing or
   holds another key, does not load at all.
+- **The build never holds the key.** `attest run --sign` loads the signing
+  key only after the last step has exited, so no step runs in a process that
+  holds it. The key file itself is another matter: `.attest/keys/` is in the
+  workspace, readable by anything running as you, which is why
+  `ATTEST_KEYS_DIR` can point outside it and why a release signs in a separate
+  job. There, `attest sign` signs receipts produced by a job that had no key,
+  in a job that runs nothing the project controls. The signing boundary is
+  that job: it is the one component trusted to authorize a receipt.
 - **"Isolated" is a list, not a word.** `--verify` runs steps under process
   isolation, which enforces memory and open-file limits and timeouts when they
   are configured, and nothing else: no network control, no filesystem control,
