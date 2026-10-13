@@ -210,11 +210,23 @@ Building from source requires Rust **1.89** or later (the MSRV is declared in
 `Cargo.toml` and tested in CI):
 
 ```console
-$ cargo install continuum-attest
+$ cargo install continuum-attest --locked
 ```
 
 The crate is published as `continuum-attest` — `attest` was taken on crates.io
-by an unrelated project — but the installed command is `attest`.
+by an unrelated project — but the installed command is `attest`. `--locked`
+installs the dependency graph that was tested and reviewed for that version,
+from the `Cargo.lock` shipped in the package; without it cargo resolves
+whatever is newest today, which is a graph nobody tested. CI installs every
+release from its own package this way.
+
+Three things are reproducible, and they are not the same thing. The *source
+dependencies* are: the lock pins every crate by version and checksum. The
+*toolchain* is: release artifacts are built with the compiler version pinned in
+the workflows, and each binary ships with a `build-info.json` naming the
+`rustc` release and commit, the target, and the lock's digest. The *artifact
+bytes* are reproducible per platform for the same tag and toolchain, which the
+release workflow holds itself to; across platforms they differ by nature.
 
 Signed release binaries are published on the
 [releases page](https://github.com/Alien6-Studio/continuum-attest/releases) with

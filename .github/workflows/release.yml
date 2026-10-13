@@ -74,11 +74,48 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned, like every other job that shapes a release artifact. A
+      # floating channel would let two builds of the same tag use two
+      # compilers and call both "the release".
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Build
         run: cargo build --release --locked
+
+      # What built this binary, next to the binary: compiler, target, and
+      # the lock it was built from. Provenance that only says "this
+      # workflow" leaves a recipient to guess at the inputs that shaped
+      # the bytes.
+      - name: Record the build inputs
+        run: |
+          set -euo pipefail
+          INFO="attest-${GITHUB_REF_NAME}-${{ matrix.name }}.build-info.json"
+          python3 - "$INFO" "${{ matrix.name }}" <<'PY'
+          import json, hashlib, subprocess, sys
+          info, name = sys.argv[1], sys.argv[2]
+          rustc = subprocess.check_output(["rustc", "-vV"], text=True)
+          fields = dict(line.split(": ", 1) for line in rustc.splitlines() if ": " in line)
+          cargo = subprocess.check_output(["cargo", "-V"], text=True).strip()
+          lock = hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest()
+          json.dump({
+              "platform": name,
+              "rustc": {"release": fields.get("release"), "commit": fields.get("commit-hash"),
+                        "host": fields.get("host"), "llvm": fields.get("LLVM version")},
+              "cargo": cargo,
+              "target": fields.get("host"),
+              "profile": "release",
+              "locked": True,
+              "cargo_lock_sha256": lock,
+              "source": {"ref": "${{ github.ref_name }}", "sha": "${{ github.sha }}"},
+          }, open(info, "w"), indent=2, sort_keys=True)
+          open(info, "a").write("\n")
+          PY
+          cat "$INFO"
+          echo "info=$INFO" >> "$GITHUB_OUTPUT"
+        id: info
 
       # The tarball has to be reproducible: rebuilding the same tag on the
       # same platform must yield the same bytes. Plain `tar -czf` bakes in the
@@ -115,6 +152,41 @@ jobs:
           path: |
             ${{ steps.package.outputs.pkg }}
             ${{ steps.package.outputs.pkg }}.sha256
+            ${{ steps.info.outputs.info }}
+          retention-days: 7
+
+  # The source package that will go to crates.io, built and checked here,
+  # from the reviewed lock, before anything is published anywhere: the
+  # crate is a release subject like the binaries.
+  crate:
+    name: Source package
+    needs: gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Package from the locked graph
+        run: cargo package --locked
+      # The documented install path, run on the exact package, with the
+      # exact lock a recipient gets: if `cargo install --locked` cannot
+      # reproduce the graph, the release is not installable as documented.
+      - name: Install the package the documented way
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          cargo install --locked --path "target/package/continuum-attest-${version}" --root "$RUNNER_TEMP/install"
+          "$RUNNER_TEMP/install/bin/attest" --version
+          cp "target/package/continuum-attest-${version}.crate" .
+          echo "crate=continuum-attest-${version}.crate" >> "$GITHUB_OUTPUT"
+        id: pkg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crate
+          path: ${{ steps.pkg.outputs.crate }}
           retention-days: 7
 
   attest-self:
@@ -130,6 +202,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
         with:
+          toolchain: "1.98.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
@@ -179,7 +252,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
-      - run: cargo install cargo-cyclonedx --locked
+        with:
+          toolchain: "1.98.1"
+      # Version-pinned: the SBOM's shape is an input to the release, and a
+      # tool that floats would change it between two runs of the same tag.
+      - run: cargo install cargo-cyclonedx --version 0.5.9 --locked
       - name: Generate CycloneDX SBOM
         run: cargo cyclonedx --format json --all --override-filename attest-sbom
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -190,7 +267,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [build, attest-self, sbom]
+    needs: [build, crate, attest-self, sbom]
     runs-on: ubuntu-latest
     # Tags only. Without this, `workflow_dispatch` would try to publish a
     # release from a branch, so there would be no way to rehearse the whole
@@ -222,6 +299,8 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -name 'attest-*.tar.gz*' -exec cp {} release/ \;
+          find artifacts -name 'attest-*.build-info.json' -exec cp {} release/ \;
+          cp artifacts/crate/*.crate release/
           cp artifacts/sbom/attest-sbom.json release/
           # Not `|| true`: attest shipping a release with no receipt of its
           # own build is the one failure this project cannot paper over.

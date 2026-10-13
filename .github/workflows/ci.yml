@@ -138,6 +138,31 @@ jobs:
 
       - run: cargo check --all-targets --locked
 
+  # The documented install path, on the exact package crates.io would get,
+  # with the lock inside it: `cargo install --locked` refuses a graph the
+  # lock does not reproduce, which is the whole point of documenting
+  # --locked.
+  crate:
+    name: packaged crate installs --locked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Package and install from the package
+        run: |
+          set -euo pipefail
+          cargo package --locked
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          cargo install --locked --path "target/package/continuum-attest-${version}" --root "$RUNNER_TEMP/install"
+          "$RUNNER_TEMP/install/bin/attest" --version
+
   # On Linux and on macOS: a recipient on a Mac produces and verifies a
   # receipt with the platform's own filesystem semantics, so that path is
   # exercised before a release, not discovered by the first Mac user.
