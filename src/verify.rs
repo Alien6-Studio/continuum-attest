@@ -54,16 +54,25 @@ pub enum Requirement {
     Trust,
     /// The receipt records an execution in which every step succeeded.
     Success,
+    /// A structurally valid SPDX SBOM attestation (images only).
+    Sbom,
+    /// A complete SLSA provenance attestation (images only).
+    Provenance,
+    /// Provenance bound to the expected source revision (images only).
+    Revision,
 }
 
 impl Requirement {
-    pub const ALL: [Requirement; 6] = [
+    pub const ALL: [Requirement; 9] = [
         Requirement::Signature,
         Requirement::Timestamp,
         Requirement::Recompute,
         Requirement::Linkage,
         Requirement::Trust,
         Requirement::Success,
+        Requirement::Sbom,
+        Requirement::Provenance,
+        Requirement::Revision,
     ];
 
     pub fn name(self) -> &'static str {
@@ -74,6 +83,9 @@ impl Requirement {
             Requirement::Linkage => "linkage",
             Requirement::Trust => "trust",
             Requirement::Success => "success",
+            Requirement::Sbom => "sbom",
+            Requirement::Provenance => "provenance",
+            Requirement::Revision => "revision",
         }
     }
 }
@@ -214,9 +226,12 @@ pub fn apply_policy(verdict: &mut ReceiptVerdict, policy: &Policy) {
     let mut unmet = Vec::new();
     for requirement in &policy.required {
         let reason = match requirement {
-            Requirement::Signature | Requirement::Timestamp | Requirement::Recompute => {
-                check_reason(verdict, requirement.name())
-            }
+            Requirement::Signature
+            | Requirement::Timestamp
+            | Requirement::Recompute
+            | Requirement::Sbom
+            | Requirement::Provenance
+            | Requirement::Revision => check_reason(verdict, requirement.name()),
             Requirement::Linkage => check_reason(verdict, "chain-linkage"),
             Requirement::Trust => match &verdict.trust_material {
                 Some(material) if material.state == "current" => None,

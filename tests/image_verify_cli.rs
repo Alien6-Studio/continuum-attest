@@ -413,3 +413,228 @@ fn signed_verification_receipt_passes_attest_verify() {
         .assert()
         .success();
 }
+
+// ---------------------------------------------------------------------------
+// Issue #41: one policy model, fail closed.
+// ---------------------------------------------------------------------------
+
+const IDENTITY: &str =
+    "https://github.com/alien6/gateway/.github/workflows/release.yml@refs/tags/v1.2.3";
+const ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// Keyless verification pins an identity and its issuer, both, and the
+/// pair goes to cosign verbatim. Half a pin is refused before anything
+/// runs.
+#[test]
+fn keyless_verification_pins_identity_and_issuer() {
+    let fixture = fixture();
+    attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--certificate-identity",
+            IDENTITY,
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "--certificate-identity requires --certificate-oidc-issuer",
+        ));
+    attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--certificate-oidc-issuer",
+            ISSUER,
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("would accept any identity"));
+    attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--key",
+            KMS_URI,
+            "--certificate-identity",
+            IDENTITY,
+            "--certificate-oidc-issuer",
+            ISSUER,
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("not both"));
+    assert!(
+        !fixture.cosign_argv.exists() && !fixture.docker_argv.exists(),
+        "nothing may run before a usage error"
+    );
+
+    let output = attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--certificate-identity",
+            IDENTITY,
+            "--certificate-oidc-issuer",
+            ISSUER,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["verdict"], "pass");
+    assert_eq!(
+        report["policy"]["required"],
+        serde_json::json!(["signature"])
+    );
+    assert_eq!(report["policy"]["unmet"], serde_json::json!([]));
+    let cosign_calls = recorded(&fixture.cosign_argv);
+    assert_eq!(
+        cosign_calls,
+        vec![vec![
+            "verify".to_string(),
+            "--certificate-identity".to_string(),
+            IDENTITY.to_string(),
+            "--certificate-oidc-issuer".to_string(),
+            ISSUER.to_string(),
+            DIGEST.to_string(),
+        ]]
+    );
+}
+
+/// A required revision with nothing in the provenance to hold it to is
+/// missing evidence, and missing evidence is a failure, not a skip.
+#[test]
+fn a_required_revision_with_no_evidence_fails() {
+    let mut fixture = fixture();
+    fixture.provenance_fixture = fixture_path("provenance_slsa_v02.json");
+    let output = attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--expected-revision",
+            FIXTURE_REVISION,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(report["verdict"], "fail");
+    let revision = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "revision")
+        .unwrap();
+    assert_eq!(revision["status"], "fail");
+    assert!(revision["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no SLSA v1 document carries a vcs.revision"));
+    assert_eq!(
+        report["policy"]["required"],
+        serde_json::json!(["revision"])
+    );
+    assert_eq!(report["policy"]["unmet"][0]["requirement"], "revision");
+}
+
+/// A verification that checks nothing does not pass; it does not run.
+#[test]
+fn verifying_nothing_is_a_usage_error() {
+    let fixture = fixture();
+    attest(&fixture)
+        .args(["image", "verify", DIGEST])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "at least one property to establish",
+        ));
+    attest(&fixture)
+        .args(["image", "verify", DIGEST, "--format", "json"])
+        .assert()
+        .code(2);
+    assert!(!fixture.docker_argv.exists(), "nothing may run");
+}
+
+/// Writing and signing a verification receipt records the verdict; it
+/// does not improve it. A failed verification with a signed receipt is
+/// still exit 1, and the receipt says the step failed.
+#[test]
+fn a_signed_receipt_does_not_soften_a_failed_verdict() {
+    let fixture = fixture();
+    let workspace = tempfile::tempdir().unwrap();
+    attest(&fixture)
+        .arg("init")
+        .current_dir(workspace.path())
+        .assert()
+        .success();
+    let key = {
+        let out = attest(&fixture)
+            .args(["keys", "generate", "--name", "verifier"])
+            .current_dir(workspace.path())
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let output = attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--expected-revision",
+            &"f".repeat(40),
+            "--sign-receipt",
+            "--receipt-key",
+            &key,
+        ])
+        .current_dir(workspace.path())
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains(
+            "REFUSED: requirement 'revision' not met",
+        ))
+        .get_output()
+        .stdout
+        .clone();
+    let receipt_path = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .last()
+        .unwrap()
+        .to_string();
+    let receipt = std::fs::read_to_string(&receipt_path).unwrap();
+    assert!(receipt.contains("exit_code: 1"), "{receipt}");
+    assert!(receipt.contains("signature:"), "{receipt}");
+}
+
+/// The text report states the policy it applied, the same one the JSON
+/// carries, so a reader of either knows what was required.
+#[test]
+fn the_report_states_the_policy_it_applied() {
+    let fixture = fixture();
+    attest(&fixture)
+        .args([
+            "image",
+            "verify",
+            DIGEST,
+            "--require-sbom",
+            "--require-provenance",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("required: sbom, provenance"))
+        .stdout(predicates::str::contains("signature  skipped"));
+}

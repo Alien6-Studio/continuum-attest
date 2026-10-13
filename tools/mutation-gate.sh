@@ -225,6 +225,14 @@ mutate "a stranger's first bundle needs a pin" src/trust.rs \
 assert s.count(old) == 1, "unpinned-issuer arm moved"
 new = s.replace(old, "        None if false => {")'
 
+mutate "a required revision with no evidence is a failure" src/crypto/supply_chain.rs \
+  image_verify_cli a_required_revision_with_no_evidence_fails \
+  'old = """                Ok(None) => CheckResult::fail(
+                    "revision","""
+assert s.count(old) == 1, "revision no-evidence arm moved"
+new = s.replace(old, """                Ok(None) => CheckResult::skipped(
+                    "revision",""")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

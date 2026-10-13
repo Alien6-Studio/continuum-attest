@@ -591,9 +591,6 @@ enum ImageCommands {
         )]
         image: String,
 
-        #[arg(long, help = "Show detailed verification information")]
-        detailed: bool,
-
         #[arg(long, help = "Enforce a structurally valid SPDX SBOM attestation")]
         require_sbom: bool,
 
@@ -615,6 +612,20 @@ enum ImageCommands {
                     or a public-key file; enables the signature check"
         )]
         key: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "IDENTITY",
+            help = "Keyless: the certificate identity the signature must carry (with --certificate-oidc-issuer)"
+        )]
+        certificate_identity: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "ISSUER",
+            help = "Keyless: the OIDC issuer the identity must come from (with --certificate-identity)"
+        )]
+        certificate_oidc_issuer: Option<String>,
 
         #[arg(
             long,
@@ -1136,26 +1147,9 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
 
-        Commands::Image { action } => match action {
-            ImageCommands::Sign {
-                image_ref,
-                key,
-                annotations,
-                allow_file_key,
-                no_require_clean_tree,
-                clean_paths,
-                receipt_dir,
-                sign,
-                receipt_key,
-            } => {
-                refuse_unmet(&[Prerequisite {
-                    option: "--receipt-key",
-                    given: receipt_key.is_some(),
-                    requires: "--sign",
-                    met: sign,
-                    why: "a key was named but the signing receipt would not be signed",
-                }]);
-                let code = handle_image_sign(
+        Commands::Image { action } => {
+            match action {
+                ImageCommands::Sign {
                     image_ref,
                     key,
                     annotations,
@@ -1165,36 +1159,87 @@ async fn main() -> Result<()> {
                     receipt_dir,
                     sign,
                     receipt_key,
-                );
-                std::process::exit(code);
-            }
-            ImageCommands::Verify {
-                image,
-                detailed,
-                require_sbom,
-                require_provenance,
-                expected_revision,
-                key,
-                format,
-                receipt,
-                receipt_dir,
-                sign_receipt,
-                receipt_key,
-            } => {
-                refuse_unmet(&[Prerequisite {
-                    option: "--receipt-key",
-                    given: receipt_key.is_some(),
-                    requires: "--sign-receipt",
-                    met: sign_receipt,
-                    why: "a key was named but the verification receipt would not be signed",
-                }]);
-                let receipt_requested = receipt || receipt_dir.is_some() || sign_receipt;
-                let supply_chain_requested = require_sbom
-                    || require_provenance
-                    || expected_revision.is_some()
-                    || key.is_some()
-                    || receipt_requested;
-                if supply_chain_requested {
+                } => {
+                    refuse_unmet(&[Prerequisite {
+                        option: "--receipt-key",
+                        given: receipt_key.is_some(),
+                        requires: "--sign",
+                        met: sign,
+                        why: "a key was named but the signing receipt would not be signed",
+                    }]);
+                    let code = handle_image_sign(
+                        image_ref,
+                        key,
+                        annotations,
+                        allow_file_key,
+                        no_require_clean_tree,
+                        clean_paths,
+                        receipt_dir,
+                        sign,
+                        receipt_key,
+                    );
+                    std::process::exit(code);
+                }
+                ImageCommands::Verify {
+                    image,
+                    require_sbom,
+                    require_provenance,
+                    expected_revision,
+                    key,
+                    certificate_identity,
+                    certificate_oidc_issuer,
+                    format,
+                    receipt,
+                    receipt_dir,
+                    sign_receipt,
+                    receipt_key,
+                } => {
+                    let signature_requested = key.is_some()
+                        || (certificate_identity.is_some() && certificate_oidc_issuer.is_some());
+                    let anything_requested = require_sbom
+                        || require_provenance
+                        || expected_revision.is_some()
+                        || signature_requested;
+                    refuse_unmet(&[
+                    Prerequisite {
+                        option: "--receipt-key",
+                        given: receipt_key.is_some(),
+                        requires: "--sign-receipt",
+                        met: sign_receipt,
+                        why: "a key was named but the verification receipt would not be signed",
+                    },
+                    Prerequisite {
+                        option: "--certificate-identity",
+                        given: certificate_identity.is_some(),
+                        requires: "--certificate-oidc-issuer",
+                        met: certificate_oidc_issuer.is_some(),
+                        why: "an identity is only meaningful from a named issuer",
+                    },
+                    Prerequisite {
+                        option: "--certificate-oidc-issuer",
+                        given: certificate_oidc_issuer.is_some(),
+                        requires: "--certificate-identity",
+                        met: certificate_identity.is_some(),
+                        why: "an issuer alone would accept any identity it issued",
+                    },
+                    Prerequisite {
+                        option: "--key",
+                        given: key.is_some(),
+                        requires: "no --certificate-identity",
+                        met: certificate_identity.is_none(),
+                        why: "a signature is verified against a key or against an identity, not both",
+                    },
+                    Prerequisite {
+                        option: "image verify",
+                        given: true,
+                        requires: "at least one property to establish",
+                        met: anything_requested,
+                        why: "pass --key or --certificate-identity with --certificate-oidc-issuer, \
+                              --require-sbom, --require-provenance or --expected-revision; a \
+                              verification that checks nothing does not pass, it does not run",
+                    },
+                ]);
+                    let receipt_requested = receipt || receipt_dir.is_some() || sign_receipt;
                     let receipt_options = if receipt_requested {
                         Some(attest::crypto::supply_chain::VerifyReceiptOptions {
                             receipt_dir: receipt_dir.map(std::path::PathBuf::from),
@@ -1204,23 +1249,23 @@ async fn main() -> Result<()> {
                     } else {
                         None
                     };
-                    let code = handle_image_supply_chain(
-                        image,
+                    let request = attest::crypto::supply_chain::SupplyChainRequest {
+                        image_ref: image,
                         require_sbom,
                         require_provenance,
                         expected_revision,
-                        key,
-                        format,
-                        receipt_options,
-                    );
+                        key_uri: key,
+                        certificate_identity,
+                        certificate_oidc_issuer,
+                    };
+                    let code = handle_image_supply_chain(request, format, receipt_options);
                     std::process::exit(code);
                 }
-                handle_image_verify(image, detailed).await
+                ImageCommands::Config { show, test_cosign } => {
+                    handle_image_config(show, test_cosign).await
+                }
             }
-            ImageCommands::Config { show, test_cosign } => {
-                handle_image_config(show, test_cosign).await
-            }
-        },
+        }
 
         Commands::Causal { action } => match action {
             CausalCommands::Path {
@@ -2008,17 +2053,11 @@ fn handle_image_sign(
 /// signature with the Azure KMS export workaround (IMG-9/10). Exit
 /// codes per IMG-12: 0 pass, 1 enforced check failed, 2 operational.
 fn handle_image_supply_chain(
-    image: String,
-    require_sbom: bool,
-    require_provenance: bool,
-    expected_revision: Option<String>,
-    key: Option<String>,
+    request: attest::crypto::supply_chain::SupplyChainRequest,
     format: String,
     receipt_options: Option<attest::crypto::supply_chain::VerifyReceiptOptions>,
 ) -> i32 {
-    use attest::crypto::supply_chain::{
-        write_verification_receipt, SupplyChainRequest, SupplyChainVerifier,
-    };
+    use attest::crypto::supply_chain::{write_verification_receipt, SupplyChainVerifier};
 
     if format != "text" && format != "json" {
         eprintln!(
@@ -2028,15 +2067,7 @@ fn handle_image_supply_chain(
         return 2;
     }
 
-    let request = SupplyChainRequest {
-        image_ref: image,
-        require_sbom,
-        require_provenance,
-        expected_revision,
-        key_uri: key,
-    };
-
-    let verifier = match SupplyChainVerifier::locate(request.key_uri.is_some()) {
+    let verifier = match SupplyChainVerifier::locate(request.signature_requested()) {
         Ok(verifier) => verifier,
         Err(failure) => {
             eprintln!("error: {}", failure.message());
@@ -2063,6 +2094,15 @@ fn handle_image_supply_chain(
                         attest::crypto::supply_chain::CheckStatus::Skipped => "skipped",
                     };
                     println!("  {:<10} {:<7} {}", check.name, status, check.detail);
+                }
+                let names: Vec<&str> = report.policy.required.iter().map(|r| r.name()).collect();
+                println!("required: {}", names.join(", "));
+                for unmet in &report.policy.unmet {
+                    println!(
+                        "REFUSED: requirement '{}' not met: {}",
+                        unmet.requirement.name(),
+                        unmet.reason
+                    );
                 }
                 println!("verdict: {}", report.verdict);
             }
@@ -2095,56 +2135,6 @@ fn handle_image_supply_chain(
     }
 }
 
-async fn handle_image_verify(image: String, detailed: bool) -> Result<()> {
-    use attest::crypto::image_verification::{
-        EnforcementLevel, ImageVerificationConfig, ImageVerifier,
-    };
-
-    println!("Verifying container image: {}", image);
-
-    // Create verification configuration (warn to demo without cosign)
-    let config = ImageVerificationConfig {
-        enforcement_level: EnforcementLevel::Warn,
-        ..Default::default()
-    };
-
-    // Create verifier and verify image
-    let verifier = ImageVerifier::new(config)?;
-    let result = verifier.verify_image_signature(&image).await?;
-
-    // Display results
-    if result.is_valid {
-        println!("Image signature verification PASSED");
-        println!("Image: {}", image);
-        println!("Digest: {}", result.image_digest);
-
-        if let Some(sig_info) = &result.signature_info {
-            println!("Signer: {}", sig_info.signer);
-            if let Some(issuer) = &sig_info.oidc_issuer {
-                println!("OIDC Issuer: {}", issuer);
-            }
-        }
-    } else {
-        println!("Image signature verification FAILED");
-        println!("Image: {}", image);
-        for message in &result.messages {
-            println!("warning:  {}", message);
-        }
-    }
-
-    if detailed {
-        println!("\nDetailed Verification Information:");
-        println!(
-            "   Verified at: {}",
-            result.verified_at.format("%Y-%m-%d %H:%M:%S UTC")
-        );
-        println!("Messages: {:#?}", result.messages);
-    }
-
-    Ok(())
-}
-
-/// Handle image configuration command
 async fn handle_image_config(show: bool, test_cosign: bool) -> Result<()> {
     use attest::crypto::image_verification::{ImageVerificationConfig, ImageVerifier};
 

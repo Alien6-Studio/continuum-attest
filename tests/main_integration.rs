@@ -268,26 +268,6 @@ fn test_image_verify_command() {
 }
 
 #[test]
-fn test_image_verify_command_detailed() {
-    if !cosign_available() {
-        eprintln!("Skipping test_image_verify_command_detailed: cosign not installed");
-        return;
-    }
-    // Test image verification with detailed flag
-    let mut cmd = Command::cargo_bin("attest").unwrap();
-    cmd.arg("image")
-        .arg("verify")
-        .arg("alpine:latest")
-        .arg("--detailed")
-        .timeout(std::time::Duration::from_secs(30))
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(
-            "Detailed Verification Information",
-        ));
-}
-
-#[test]
 fn test_image_config_show() {
     // Test image config show
     let mut cmd = Command::cargo_bin("attest").unwrap();

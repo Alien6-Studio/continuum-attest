@@ -149,7 +149,11 @@ whose receipt does not describe it — which is the point.
   single command, no pipeline file needed. This is how you adopt it inside an
   existing CI job without rewriting it.
 - **Container images.** `attest image sign|verify` wraps cosign and checks SBOM
-  (SPDX), SLSA provenance, and revision binding.
+  (SPDX), SLSA provenance, and revision binding, under one policy: every
+  property a flag asks for must be established, a required check is never
+  skipped, and a verification that checks nothing does not run. Signatures are
+  verified against a key, or keyless against a named `--certificate-identity`
+  from a named `--certificate-oidc-issuer`; never against "any valid identity".
 
 ## What it does not claim
 
