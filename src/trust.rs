@@ -432,3 +432,185 @@ pub fn report(path: &Path, bundle: &TrustBundle, now: DateTime<Utc>) -> BundleRe
         checks,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Import: a bundle becomes local trust, and says what it changed.
+// ---------------------------------------------------------------------------
+
+/// Where accepted bundles are kept, one per issuer, named by the issuer's
+/// key id. The copy is what a later import is compared against, so that
+/// "newer than what I already accepted" survives a restart.
+fn accepted_dir(trust_dir: &Path) -> std::path::PathBuf {
+    trust_dir.join("bundles")
+}
+
+fn accepted_bundle(trust_dir: &Path, issuer: &str) -> Result<Option<TrustBundle>> {
+    let path = accepted_dir(trust_dir).join(format!("{issuer}.json"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read(&path).map(Some)
+}
+
+/// What an import did to the local store, key by key.
+#[derive(Debug, Default, Serialize)]
+pub struct ImportReport {
+    pub issuer: String,
+    pub sequence: u64,
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Keys the store did not have: id, name, status as imported.
+    pub added: Vec<(String, String, KeyStatus)>,
+    /// Keys the store trusted and the bundle revokes: id, name, when.
+    pub revoked: Vec<(String, String, DateTime<Utc>)>,
+    /// Keys the store had already revoked and the bundle lists as trusted.
+    /// A bundle does not un-revoke: the local decision stands, and the
+    /// recipient is told.
+    pub kept_revoked: Vec<(String, String)>,
+    pub unchanged: usize,
+    /// True when the bundle was already the accepted one; nothing was
+    /// written.
+    pub already_current: bool,
+}
+
+/// Import a bundle into the workspace's trust store, or refresh from a
+/// newer one. Never reaches the network: the file is what it is given.
+///
+/// The first bundle from an issuer needs `expected_issuer`: the recipient
+/// names the key id they obtained through another channel, and a bundle
+/// from anyone else is refused whatever it contains. Later bundles from
+/// that issuer must be newer than the one already accepted, by the signed
+/// sequence; an older one is a replay and is refused.
+pub fn import(
+    workspace: &Path,
+    bundle_path: &Path,
+    expected_issuer: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<ImportReport> {
+    let bundle = read(bundle_path)?;
+    let failed: Vec<String> = examine(&bundle, now)
+        .into_iter()
+        .filter(|c| !c.passed)
+        .map(|c| format!("{}: {}", c.name, c.detail))
+        .collect();
+    if !failed.is_empty() {
+        bail!("refusing {}: {}", bundle_path.display(), failed.join("; "));
+    }
+
+    let store = KeyStore::new(workspace);
+    let trust_dir = store.trust_dir();
+    let issuer = bundle.issuer.key_id.clone();
+    if let Some(expected) = expected_issuer {
+        if expected != issuer {
+            bail!(
+                "bundle is issued by {} but you expected {}; refusing it whatever it contains",
+                issuer,
+                expected
+            );
+        }
+    }
+    let previous = accepted_bundle(&trust_dir, &issuer)?;
+    match &previous {
+        None if expected_issuer.is_none() => bail!(
+            "first bundle from issuer {}: name the issuer you expect with --issuer <KEY_ID>, \
+             obtained from the producer through a channel other than this file",
+            issuer
+        ),
+        None => {}
+        Some(previous) if bundle.sequence < previous.sequence => bail!(
+            "bundle sequence {} is older than the one already accepted from {} (sequence {}); \
+             a bundle cannot go backwards",
+            bundle.sequence,
+            issuer,
+            previous.sequence
+        ),
+        Some(previous)
+            if bundle.sequence == previous.sequence && bundle.signature != previous.signature =>
+        {
+            bail!(
+                "a different bundle with sequence {} was already accepted from {}; \
+                 two bundles cannot share a sequence",
+                bundle.sequence,
+                issuer
+            )
+        }
+        Some(_) => {}
+    }
+
+    let mut report = ImportReport {
+        issuer: issuer.clone(),
+        sequence: bundle.sequence,
+        valid_until: Some(bundle.valid_until),
+        ..ImportReport::default()
+    };
+    if previous
+        .as_ref()
+        .is_some_and(|p| p.signature == bundle.signature)
+    {
+        report.already_current = true;
+        report.unchanged = bundle.keys.len();
+        return Ok(report);
+    }
+
+    // Public key files first: the policy is checked against them on load.
+    std::fs::create_dir_all(&trust_dir)?;
+    for key in &bundle.keys {
+        let public_path = trust_dir.join(format!("{}.pub", key.id));
+        if public_path.exists() {
+            continue;
+        }
+        let bytes = hex::decode(&key.public_key).context("public key hex")?;
+        let array: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("public key length"))?;
+        let verifying_key = VerifyingKey::from_bytes(&array).context("public key")?;
+        let pem = ed25519_dalek::pkcs8::EncodePublicKey::to_public_key_pem(
+            &verifying_key,
+            ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF,
+        )
+        .context("cannot encode public key as PEM")?;
+        std::fs::write(&public_path, pem.as_bytes())
+            .with_context(|| format!("cannot write {}", public_path.display()))?;
+    }
+
+    let mut policy = TrustPolicy::load(&trust_dir)?;
+    for key in &bundle.keys {
+        match policy.keys.iter_mut().find(|k| k.id == key.id) {
+            None => {
+                policy.keys.push(crate::keys::TrustEntry {
+                    id: key.id.clone(),
+                    name: key.name.clone(),
+                    status: key.status,
+                    revoked_at: key.revoked_at,
+                });
+                report
+                    .added
+                    .push((key.id.clone(), key.name.clone(), key.status));
+            }
+            Some(entry) => match (entry.status, key.status) {
+                (KeyStatus::Trusted, KeyStatus::Revoked) => {
+                    entry.status = KeyStatus::Revoked;
+                    entry.revoked_at = key.revoked_at;
+                    report.revoked.push((
+                        key.id.clone(),
+                        entry.name.clone(),
+                        key.revoked_at.unwrap_or(DateTime::<Utc>::MIN_UTC),
+                    ));
+                }
+                (KeyStatus::Revoked, KeyStatus::Trusted) => {
+                    report
+                        .kept_revoked
+                        .push((key.id.clone(), entry.name.clone()));
+                }
+                _ => report.unchanged += 1,
+            },
+        }
+    }
+    policy.save(&trust_dir)?;
+
+    // Only once the store holds the keys: an accepted-bundle record for a
+    // policy that failed to write would refuse the retry as a replay.
+    let dir = accepted_dir(&trust_dir);
+    std::fs::create_dir_all(&dir)?;
+    write(&bundle, &dir.join(format!("{issuer}.json")))?;
+    Ok(report)
+}

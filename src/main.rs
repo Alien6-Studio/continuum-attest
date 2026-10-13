@@ -443,6 +443,27 @@ enum TrustCommands {
         workspace: Option<String>,
     },
 
+    /// Import a bundle into the trust store, or refresh from a newer one; never online
+    #[command(visible_alias = "refresh")]
+    Import {
+        #[arg(value_name = "BUNDLE", help = "Bundle file")]
+        bundle: String,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Issuer key id you expect, obtained through another channel; required the first time"
+        )]
+        issuer: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Workspace holding .attest/ (default: current directory)"
+        )]
+        workspace: Option<String>,
+    },
+
     /// Read a bundle and say who issued it, until when, and whether it is intact
     Show {
         #[arg(value_name = "BUNDLE", help = "Bundle file")]
@@ -1227,6 +1248,65 @@ fn handle_trust(action: TrustCommands) -> i32 {
                 Err(err) => {
                     eprintln!("error: {err:#}");
                     2
+                }
+            }
+        }
+
+        TrustCommands::Import {
+            bundle,
+            issuer,
+            workspace,
+        } => {
+            let workspace = workspace
+                .map(std::path::PathBuf::from)
+                .map_or_else(std::env::current_dir, Ok)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot determine working directory: {e}");
+                    std::process::exit(2);
+                });
+            match attest::trust::import(
+                &workspace,
+                std::path::Path::new(&bundle),
+                issuer.as_deref(),
+                chrono::Utc::now(),
+            ) {
+                Ok(report) => {
+                    if report.already_current {
+                        println!(
+                            "already current: bundle {} from {} was accepted before",
+                            report.sequence, report.issuer
+                        );
+                        return 0;
+                    }
+                    for (id, name, status) in &report.added {
+                        println!("added    {id}  {name:<20} {status}");
+                    }
+                    for (id, name, at) in &report.revoked {
+                        println!("revoked  {id}  {name:<20} at {at}");
+                    }
+                    for (id, name) in &report.kept_revoked {
+                        println!(
+                            "kept     {id}  {name:<20} revoked here; the bundle lists it as trusted, \
+                             a bundle does not un-revoke"
+                        );
+                    }
+                    println!(
+                        "accepted bundle {} from {}: {} added, {} revoked, {} unchanged; valid until {}",
+                        report.sequence,
+                        report.issuer,
+                        report.added.len(),
+                        report.revoked.len(),
+                        report.unchanged,
+                        report
+                            .valid_until
+                            .map(|t| t.to_string())
+                            .unwrap_or_default()
+                    );
+                    0
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    1
                 }
             }
         }

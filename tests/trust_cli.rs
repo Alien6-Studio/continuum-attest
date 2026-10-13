@@ -3,6 +3,7 @@
 //! over what period it is valid, and whether anything in it was altered.
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use std::path::Path;
 
 fn attest() -> Command {
@@ -203,4 +204,229 @@ fn bundling_leaves_the_trust_store_unchanged() {
     bundle(tmp.path(), &[]);
     let after = std::fs::read_to_string(tmp.path().join(".attest/trust/trust.toml")).unwrap();
     assert_eq!(before, after);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #16: trust material moves between machines as a file, never online.
+// ---------------------------------------------------------------------------
+
+const TOY_PIPELINE: &str = r#"
+version: "1.0"
+name: toy
+steps:
+  copy:
+    run: "cat in.txt > out.txt"
+    inputs: ["in.txt"]
+    outputs: ["out.txt"]
+    cache: false
+"#;
+
+fn producer_with_signed_receipt() -> (tempfile::TempDir, String, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    std::fs::write(dir.path().join("attest.yaml"), TOY_PIPELINE).unwrap();
+    std::fs::write(dir.path().join("in.txt"), "payload").unwrap();
+    let key = generate(dir.path(), "builder");
+    attest()
+        .args(["run", "--sign", "--key", &key])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let receipt = std::fs::read_dir(dir.path().join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .unwrap();
+    (dir, key, receipt)
+}
+
+fn bundle_to(dir: &Path, file: &str, extra: &[&str]) -> std::path::PathBuf {
+    let path = dir.join(file);
+    let mut args = vec!["trust", "bundle", "--output", path.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    attest().args(&args).current_dir(dir).assert().success();
+    path
+}
+
+fn verify_with(producer: &Path, receipt: &Path, trust: &Path) -> i32 {
+    attest()
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+        ])
+        .current_dir(producer)
+        .output()
+        .unwrap()
+        .status
+        .code()
+        .unwrap()
+}
+
+/// Export on machine A, import on machine B, verify on B; then revoke on
+/// A, refresh B from the newer bundle, and B refuses what A revoked. B
+/// never had a network, and B learns what each import changed.
+#[test]
+fn a_bundle_carries_trust_and_then_revocation_to_another_machine() {
+    let (producer, key, receipt) = producer_with_signed_receipt();
+    let first = bundle_to(producer.path(), "b1.json", &[]);
+
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    let trust = recipient.path().join(".attest/trust");
+
+    // The first bundle from an issuer is accepted only against an issuer
+    // the recipient already expects.
+    attest()
+        .args(["trust", "import", first.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("name the issuer you expect"));
+    attest()
+        .args([
+            "trust",
+            "import",
+            first.to_str().unwrap(),
+            "--issuer",
+            "00000000000000000000000000000000",
+        ])
+        .current_dir(recipient.path())
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("but you expected"));
+    assert_eq!(verify_with(producer.path(), &receipt, &trust), 1);
+
+    attest()
+        .args(["trust", "import", first.to_str().unwrap(), "--issuer", &key])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains("added"))
+        .stdout(predicates::str::contains("builder"))
+        .stdout(predicates::str::contains("1 added, 0 revoked"));
+    assert_eq!(verify_with(producer.path(), &receipt, &trust), 0);
+
+    // Revoke on A, refresh B. Sequence is issued_at in seconds, so a
+    // newer bundle needs a later second.
+    attest()
+        .args(["keys", "revoke", &key])
+        .current_dir(producer.path())
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // A revoked key cannot issue; a second, trusted key signs the update.
+    let successor = generate(producer.path(), "builder-2");
+    let second = bundle_to(producer.path(), "b2.json", &["--key", &successor]);
+    // ...which B has not pinned: refused, whatever it contains.
+    attest()
+        .args(["trust", "refresh", second.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("name the issuer you expect"));
+    attest()
+        .args([
+            "trust",
+            "refresh",
+            second.to_str().unwrap(),
+            "--issuer",
+            &successor,
+        ])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains("revoked"))
+        .stdout(predicates::str::contains("builder-2"));
+    assert_eq!(
+        verify_with(producer.path(), &receipt, &trust),
+        1,
+        "the revocation arrived and the receipt is now refused"
+    );
+    attest()
+        .args(["keys", "list"])
+        .current_dir(recipient.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("revoked"))
+        .stdout(predicates::str::contains("public only"));
+
+    // The same bundle again is a no-op, not an error.
+    attest()
+        .args(["trust", "import", second.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains("already current"));
+}
+
+/// Stale trust material is reported, not used, and never fetched.
+#[test]
+fn an_expired_bundle_is_not_imported() {
+    let tmp = tempfile::tempdir().unwrap();
+    init(tmp.path());
+    let key = generate(tmp.path(), "release");
+    let path = bundle(tmp.path(), &["--valid-for", "0"]);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    attest()
+        .args(["trust", "import", path.to_str().unwrap(), "--issuer", &key])
+        .current_dir(recipient.path())
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("expired"));
+    assert!(!recipient
+        .path()
+        .join(".attest/trust")
+        .join(format!("{key}.pub"))
+        .exists());
+}
+
+/// A revocation decided locally is not undone by a bundle that still
+/// trusts the key. The recipient is told, and the key stays revoked.
+#[test]
+fn a_bundle_does_not_unrevoke_a_local_decision() {
+    let tmp = tempfile::tempdir().unwrap();
+    init(tmp.path());
+    let issuer = generate(tmp.path(), "release");
+    let worker = generate(tmp.path(), "worker");
+    let first = bundle_to(tmp.path(), "b1.json", &["--key", &issuer]);
+
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    attest()
+        .args([
+            "trust",
+            "import",
+            first.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0);
+    attest()
+        .args(["keys", "revoke", &worker])
+        .current_dir(recipient.path())
+        .assert()
+        .success();
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = bundle_to(tmp.path(), "b2.json", &["--key", &issuer]);
+    attest()
+        .args(["trust", "import", second.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .code(0)
+        .stdout(predicates::str::contains("kept"))
+        .stdout(predicates::str::contains("does not un-revoke"));
+    attest()
+        .args(["keys", "list"])
+        .current_dir(recipient.path())
+        .assert()
+        .stdout(predicates::str::contains(&worker).and(predicates::str::contains("revoked")));
 }

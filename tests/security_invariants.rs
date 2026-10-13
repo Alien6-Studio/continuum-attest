@@ -1195,6 +1195,83 @@ fn forging_trust_by_editing_a_revocation_out_of_a_bundle_is_refused() {
         .stdout(predicates::str::contains("altered after signing"));
 }
 
+/// A verifier that accepts any bundle it is handed accepts an old one.
+/// Whoever cannot forge a bundle can still keep a revocation from arriving
+/// by handing over a copy from before it was issued; and a verifier that
+/// has already accepted the newer bundle must not be talked back into the
+/// older one. The signed sequence is the only thing that orders them, so
+/// a bundle behind the accepted one is refused, not merged.
+#[test]
+fn forging_freshness_by_replaying_an_older_bundle_is_refused() {
+    let producer = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(producer.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let worker = generate("worker");
+    let bundle = |file: &str| {
+        let path = producer.path().join(file);
+        attest()
+            .current_dir(producer.path())
+            .args([
+                "trust",
+                "bundle",
+                "--output",
+                path.to_str().unwrap(),
+                "--key",
+                &issuer,
+            ])
+            .assert()
+            .success();
+        path
+    };
+    let before = bundle("before.json");
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &worker])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let after = bundle("after.json");
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args([
+            "trust",
+            "import",
+            after.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .assert()
+        .success();
+
+    // The replay: the bundle from before the revocation, well formed and
+    // signed by the pinned issuer.
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", before.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("cannot go backwards"));
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

@@ -195,6 +195,12 @@ mutate "a bundle's signature binds its contents" src/trust.rs \
 assert s.count(old) == 1, "bundle signature check moved"
 new = s.replace(old, "let intact = verifying_key.verify(&bytes, &signature).is_ok() || true;")'
 
+mutate "an older bundle than the accepted one is a replay" src/trust.rs \
+  security_invariants forging_freshness_by_replaying_an_older_bundle_is_refused \
+  'old = "Some(previous) if bundle.sequence < previous.sequence => bail!("
+assert s.count(old) == 1, "bundle sequence check moved"
+new = s.replace(old, "Some(previous) if false && bundle.sequence < previous.sequence => bail!(")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

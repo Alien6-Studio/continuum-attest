@@ -109,7 +109,11 @@ whose receipt does not describe it — which is the point.
 - **Trust you can hand over.** `attest trust bundle` signs the keys your store
   trusts and has revoked, each revocation dated, into one file with an issuer
   and a validity window. `attest trust show` tells a recipient who issued it,
-  until when, and whether a byte of it changed, before they trust a key in it.
+  until when, and whether a byte of it changed; `attest trust import` takes it
+  into their store, naming the issuer they expect the first time, refuses an
+  older bundle than the one already accepted, and says which keys arrived and
+  which were revoked. Verification stays offline: trust material travels as a
+  file, it is never fetched.
 - **Causal ledger.** An append-only Merkle DAG of execution events with
   inclusion proofs, queryable with `attest causal path|chain|stats`.
 - **Standard interop.** `attest export --format in-toto` emits an in-toto
