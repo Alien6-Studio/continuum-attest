@@ -67,6 +67,16 @@ receipt of a failed build is still evidence.
 Exit codes are `0` pass, `1` verification failure, `2` operational error — the
 same convention across every command, so CI can branch on them.
 
+Evidence is untrusted input, and its size is the sender's choice. An archive is
+refused before anything in it is parsed if it is over 64 MiB on disk, expands
+past 512 MiB, holds more than 10 000 entries or an entry over 64 MiB; a receipt
+or a DSSE envelope over 16 MiB is refused the same way. The refusal is exit
+`2`, not a verdict, and `--format json` reports it as `resource-limit` so a
+consumer can tell "too big to look at" from "looked at and wrong". The archive
+limits are flags on `attest verify` (`--max-archive-bytes`,
+`--max-unpacked-bytes`, `--max-entries`, `--max-entry-bytes`) for the rare
+legitimate archive that needs more.
+
 `attest verify --format json RECEIPT` emits one NDJSON record per receipt file. The
 [verification result v1 schema](schemas/verification-result-v1.schema.json)
 defines its fields and five named checks (archive and interop results have

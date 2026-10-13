@@ -215,6 +215,34 @@ enum Commands {
 
         #[arg(
             long,
+            value_name = "BYTES",
+            help = "Refuse an archive larger than this on disk (default 64 MiB)"
+        )]
+        max_archive_bytes: Option<u64>,
+
+        #[arg(
+            long,
+            value_name = "BYTES",
+            help = "Refuse an archive that expands past this (default 512 MiB)"
+        )]
+        max_unpacked_bytes: Option<u64>,
+
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Refuse an archive with more entries than this (default 10000)"
+        )]
+        max_entries: Option<usize>,
+
+        #[arg(
+            long,
+            value_name = "BYTES",
+            help = "Refuse an archive entry larger than this (default 64 MiB)"
+        )]
+        max_entry_bytes: Option<u64>,
+
+        #[arg(
+            long,
             default_value = "text",
             help = "Output format: text or json (NDJSON)"
         )]
@@ -920,8 +948,25 @@ async fn main() -> Result<()> {
             trust_store,
             offline,
             require,
+            max_archive_bytes,
+            max_unpacked_bytes,
+            max_entries,
+            max_entry_bytes,
             format,
         } => {
+            let mut limits = attest::archive::ArchiveLimits::default();
+            if let Some(v) = max_archive_bytes {
+                limits.compressed = v;
+            }
+            if let Some(v) = max_unpacked_bytes {
+                limits.decompressed = v;
+            }
+            if let Some(v) = max_entries {
+                limits.entries = v;
+            }
+            if let Some(v) = max_entry_bytes {
+                limits.entry = v;
+            }
             let code = handle_verify(
                 receipts,
                 archive,
@@ -932,6 +977,7 @@ async fn main() -> Result<()> {
                 trust_store,
                 offline,
                 require,
+                limits,
                 format,
             );
             std::process::exit(code);
@@ -1526,6 +1572,7 @@ fn handle_verify(
     trust_store: Option<String>,
     _offline: bool, // all checks are local today; reserved for future remote lookups
     require: Vec<String>,
+    limits: attest::archive::ArchiveLimits,
     format: String,
 ) -> i32 {
     use attest::verify::{verify_receipt_file, Policy, VerifyOptions};
@@ -1577,12 +1624,9 @@ fn handle_verify(
 
     if let Some(archive_path) = archive {
         let path = std::path::Path::new(&archive_path);
-        let verdict = match attest::archive::verify_archive(path, &opts) {
+        let verdict = match attest::archive::verify_archive_bounded(path, &opts, &limits) {
             Ok(verdict) => verdict,
-            Err(err) => {
-                eprintln!("error: {:#}", err);
-                return 2;
-            }
+            Err(err) => return report_operational_error(&archive_path, &err, &format),
         };
 
         for receipt_verdict in &verdict.receipts {
@@ -1609,10 +1653,7 @@ fn handle_verify(
     for receipt_path in &receipts {
         let verdict = match verify_receipt_file(std::path::Path::new(receipt_path), &opts) {
             Ok(verdict) => verdict,
-            Err(err) => {
-                eprintln!("error: {:#}", err);
-                return 2;
-            }
+            Err(err) => return report_operational_error(receipt_path, &err, &format),
         };
 
         print_verdict(&verdict, &format);
@@ -1757,6 +1798,31 @@ fn handle_import(
     } else {
         1
     }
+}
+
+/// An error that stopped verification before any verdict: exit 2, and in
+/// JSON mode one record that says so, with `resource-limit` set apart from
+/// every other operational cause so a consumer never confuses "too big to
+/// look at" with "looked at and wrong".
+fn report_operational_error(subject: &str, err: &anyhow::Error, format: &str) -> i32 {
+    let kind = if attest::archive::resource_limit(err).is_some() {
+        "resource-limit"
+    } else {
+        "operational"
+    };
+    eprintln!("error: {err:#}");
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::json!({
+                "subject": subject,
+                "verdict": "error",
+                "error": kind,
+                "detail": format!("{err:#}"),
+            })
+        );
+    }
+    2
 }
 
 /// Print one receipt verdict in the requested format (text or NDJSON) and

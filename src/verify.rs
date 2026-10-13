@@ -306,9 +306,35 @@ fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
 /// `fail` check inside the returned verdict (exit code 1).
 pub fn verify_receipt_file(path: &Path, opts: &VerifyOptions) -> Result<ReceiptVerdict> {
     let display_path = path.display().to_string();
-    let content = std::fs::read(path)
+    let content = read_bounded(path, MAX_RECEIPT_BYTES, "receipt")
         .with_context(|| format!("cannot read receipt file: {}", display_path))?;
     verify_receipt_bytes(&content, &display_path, opts)
+}
+
+/// Largest receipt file this verifier will parse. A receipt holds step
+/// results and their captured output; anything past this is not one, or
+/// is one nobody should parse on a verifier's behalf.
+pub const MAX_RECEIPT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read a file supplied by someone else, refusing it before reading if
+/// it is larger than `limit`. The refusal carries a
+/// [`crate::archive::ResourceLimit`] so callers can tell it from a
+/// verification failure.
+pub fn read_bounded(path: &Path, limit: u64, what: &'static str) -> Result<Vec<u8>> {
+    let size = std::fs::metadata(path)?.len();
+    if size > limit {
+        anyhow::bail!(crate::archive::ResourceLimit {
+            limit: what,
+            detail: format!(
+                "{} is {} bytes; the limit for a {} is {}",
+                path.display(),
+                size,
+                what,
+                limit
+            ),
+        });
+    }
+    Ok(std::fs::read(path)?)
 }
 
 /// Verify a receipt already held in memory (e.g. an archive entry).

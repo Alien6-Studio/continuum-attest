@@ -381,11 +381,15 @@ fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
 /// shape as `attest verify`. `Err` is reserved for operational problems
 /// (unreadable file, content that is not JSON at all) and maps to exit
 /// code 2; every verification failure is a failed check (exit code 1).
+/// Largest DSSE envelope this importer will parse; the same reasoning as
+/// [`crate::verify::MAX_RECEIPT_BYTES`].
+pub const MAX_STATEMENT_BYTES: u64 = 16 * 1024 * 1024;
+
 pub fn import_statement_file(path: &Path, options: &ImportOptions) -> Result<ReceiptVerdict> {
     let display_path = path.display().to_string();
-    let content = std::fs::read_to_string(path)
+    let content = crate::verify::read_bounded(path, MAX_STATEMENT_BYTES, "statement")
         .with_context(|| format!("cannot read statement file: {}", display_path))?;
-    let value: serde_json::Value = serde_json::from_str(&content)
+    let value: serde_json::Value = serde_json::from_slice(&content)
         .with_context(|| format!("unreadable JSON in {}", display_path))?;
 
     let mut checks: Vec<Check> = Vec::new();
