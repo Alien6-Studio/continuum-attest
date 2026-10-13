@@ -254,6 +254,12 @@ new = s.replace(old, """        let start_time = Instant::now();
         self.load_signing_key()?;
         let mut provenance = crate::provenance::collect(""")'
 
+mutate "declared inputs are unwritable while the step runs" src/executor/mod.rs \
+  security_invariants forging_a_declared_input_from_inside_the_step_is_refused \
+  'old = "let guard = InputGuard::hold(&workspace, &step.inputs)?;"
+assert s.count(old) == 1, "input guard moved"
+new = s.replace(old, "let guard = InputGuard::hold(&workspace, &[])?;")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

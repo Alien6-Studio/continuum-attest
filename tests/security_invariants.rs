@@ -144,6 +144,11 @@ fn workspace(pipeline: &str) -> tempfile::TempDir {
 /// used to have the *rewritten* bytes recorded as its input hash. The
 /// artifact came from "before", the receipt attested "after", and
 /// verification passed on a pair that never existed together.
+///
+/// The inputs are now held unwritable while the step runs, so a plain
+/// write fails at the write. This step puts the write bit back first, as
+/// any process running as the same user can: what the permission bits
+/// cannot prevent, the re-hash after the step has to catch.
 #[test]
 fn forging_provenance_by_mutating_an_input_mid_step_is_refused() {
     let dir = workspace(
@@ -151,7 +156,7 @@ fn forging_provenance_by_mutating_an_input_mid_step_is_refused() {
          name: mutation\n\
          steps:\n  \
            build:\n    \
-             run: \"cp in.txt out.txt && echo after > in.txt\"\n    \
+             run: \"cp in.txt out.txt && chmod u+w in.txt && echo after > in.txt\"\n    \
              inputs: [\"in.txt\"]\n    \
              outputs: [\"out.txt\"]\n",
     );
@@ -1775,6 +1780,44 @@ fn forging_a_signature_with_authority_available_during_the_build_is_refused() {
     assert_eq!(
         written, 0,
         "no receipt may be signed by an authority the build had"
+    );
+}
+
+/// Rewriting a declared input used to be caught only afterwards, by the
+/// re-hash, as a run that refused to write a receipt. The step itself had
+/// already consumed and overwritten the bytes. Now the write is refused
+/// at the write: the step fails, the input is intact, and the receipt of
+/// the failed step is written. A guard that stopped guarding would let
+/// the write through, and the run would fail the other way, later, with
+/// the input already changed.
+#[cfg(unix)]
+#[test]
+fn forging_a_declared_input_from_inside_the_step_is_refused() {
+    let dir = workspace(ONE_STEP);
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        "version: \"0.1\"\n\
+         name: rewrite\n\
+         steps:\n  \
+           build:\n    \
+             run: \"cp in.txt out.txt && echo forged > in.txt\"\n    \
+             inputs: [\"in.txt\"]\n    \
+             outputs: [\"out.txt\"]\n    \
+             cache: false\n",
+    )
+    .unwrap();
+
+    attest()
+        .current_dir(dir.path())
+        .arg("run")
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("step 'build' failed"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("in.txt")).unwrap(),
+        "source\n",
+        "the write must be refused, not merely noticed"
     );
 }
 

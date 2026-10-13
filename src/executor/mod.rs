@@ -64,6 +64,100 @@ pub struct Executor<'a> {
     /// the process that holds the key, so the key is not held while steps
     /// run.
     key_loader: Option<KeyLoader>,
+    /// Whether every executed step had its declared inputs made read-only
+    /// for its duration: `None` until a step runs, `Some(false)` when the
+    /// platform or the user (root) cannot be bound by permission bits.
+    inputs_guarded: Option<bool>,
+}
+
+/// Declared inputs held unwritable while a step runs, restored afterwards.
+///
+/// Permission bits, not a mount: every regular file and directory under a
+/// declared input loses its write bits before the step starts and gets
+/// them back when the guard drops, on success or failure. A process
+/// running as the same user could put the bits back itself; that is what
+/// the re-hash after the step catches. Root is not bound by permission
+/// bits at all, and the guard says so rather than pretending.
+struct InputGuard {
+    restore: Vec<(std::path::PathBuf, u32)>,
+    enforced: bool,
+}
+
+impl InputGuard {
+    fn hold(workspace: &std::path::Path, inputs: &[std::path::PathBuf]) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if unsafe { libc::geteuid() } == 0 {
+                return Ok(Self {
+                    restore: Vec::new(),
+                    enforced: false,
+                });
+            }
+            let mut restore = Vec::new();
+            for input in inputs {
+                let root = workspace.join(input);
+                let Ok(meta) = std::fs::symlink_metadata(&root) else {
+                    // A missing input is reported by hashing, with the
+                    // right error; nothing to hold here.
+                    continue;
+                };
+                let paths: Vec<std::path::PathBuf> = if meta.is_dir() {
+                    walkdir::WalkDir::new(&root)
+                        .follow_links(false)
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .filter(|e| !e.file_type().is_symlink())
+                        .map(|e| e.into_path())
+                        .collect()
+                } else if meta.file_type().is_symlink() {
+                    Vec::new()
+                } else {
+                    vec![root]
+                };
+                for path in paths {
+                    let mode = std::fs::symlink_metadata(&path)?.permissions().mode();
+                    if mode & 0o222 == 0 {
+                        continue;
+                    }
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & !0o222))
+                        .map_err(|e| {
+                            anyhow::anyhow!("cannot make input {} read-only: {e}", path.display())
+                        })?;
+                    restore.push((path, mode));
+                }
+            }
+            Ok(Self {
+                restore,
+                enforced: true,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (workspace, inputs);
+            Ok(Self {
+                restore: Vec::new(),
+                enforced: false,
+            })
+        }
+    }
+
+    fn enforced(&self) -> bool {
+        self.enforced
+    }
+}
+
+impl Drop for InputGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in self.restore.drain(..).rev() {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+            }
+        }
+    }
 }
 
 /// Loads the keypair that signs the receipt and the ledger events. Invoked
@@ -98,6 +192,7 @@ impl<'a> Executor<'a> {
             sandbox,
             mode_config,
             key_loader: None,
+            inputs_guarded: None,
         })
     }
 
@@ -299,11 +394,20 @@ impl<'a> Executor<'a> {
                 (cached_entry.result, true)
             } else {
                 tracing::info!("Cache miss for step: {}, executing...", step_name);
+                // The declared inputs are what the receipt will say the
+                // step read. For as long as the step runs they are not
+                // writable through the filesystem: a step that tries to
+                // rewrite one fails at the write, instead of the receipt
+                // failing afterwards to describe what was built.
+                let guard = InputGuard::hold(&workspace, &step.inputs)?;
+                self.inputs_guarded = Some(self.inputs_guarded.unwrap_or(true) && guard.enforced());
                 let execution_result = if let Some(manifest) = &capsule {
-                    Self::execute_step_in_capsule(manifest, step, &workspace)?
+                    Self::execute_step_in_capsule(manifest, step, &workspace)
                 } else {
-                    self.execute_step(&step_name, step, &env).await?
+                    self.execute_step(&step_name, step, &env).await
                 };
+                drop(guard);
+                let execution_result = execution_result?;
 
                 // A step that rewrites its own declared input leaves the
                 // receipt unable to describe the build honestly: the hash
@@ -403,6 +507,35 @@ impl<'a> Executor<'a> {
             .filter(|s| s.capsule_hash.is_some())
             .map(|s| s.name.clone())
             .collect();
+        // Declared inputs: held read-only while each step ran, when the
+        // platform and the user allow permission bits to bind. The re-hash
+        // after each step detects what the bits could not prevent.
+        let (status, detail) = match self.inputs_guarded {
+            Some(true) => (
+                crate::sandbox::ControlStatus::Enforced,
+                "declared inputs unwritable (permission bits) for each step's duration, capsule \
+                 inputs mounted read-only; changes are also detected by re-hashing after the step",
+            ),
+            Some(false) if cfg!(unix) => (
+                crate::sandbox::ControlStatus::NotEnforced,
+                "running as root, permission bits do not bind; changes to declared inputs are \
+                 detected by re-hashing after the step, not prevented",
+            ),
+            Some(false) => (
+                crate::sandbox::ControlStatus::NotAvailable,
+                "no read-only view on this platform; changes to declared inputs are detected by \
+                 re-hashing after the step, not prevented",
+            ),
+            None => (
+                crate::sandbox::ControlStatus::NotEnforced,
+                "no step executed (every step was a cache hit)",
+            ),
+        };
+        isolation.controls.push(crate::sandbox::IsolationControl {
+            name: "inputs".to_string(),
+            status,
+            detail: detail.to_string(),
+        });
 
         let mut receipt = Receipt {
             schema_version: Some(crate::storage::RECEIPT_SCHEMA_VERSION),
@@ -543,7 +676,7 @@ impl<'a> Executor<'a> {
         workspace: &std::path::Path,
     ) -> Result<crate::sandbox::SandboxResult> {
         let command = vec!["sh".to_string(), "-c".to_string(), step.run.clone()];
-        let output = crate::capsule::run_captured(manifest, workspace, &command)?;
+        let output = crate::capsule::run_captured(manifest, workspace, &step.inputs, &command)?;
         Ok(crate::sandbox::SandboxResult {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),

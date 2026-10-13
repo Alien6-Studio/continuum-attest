@@ -331,6 +331,7 @@ fn capsule_network_is_none() {
     let output = capsule::run_captured(
         &manifest,
         dir.path(),
+        &[],
         &[
             "sh".to_string(),
             "-c".to_string(),
@@ -359,6 +360,7 @@ fn capsule_env_is_declared_only() {
     let output = capsule::run_captured(
         &manifest,
         dir.path(),
+        &[],
         &[
             "sh".to_string(),
             "-c".to_string(),
@@ -392,6 +394,7 @@ fn capsule_runs_are_deterministic() {
         let output = capsule::run_captured(
             &manifest,
             dir.path(),
+            &[],
             &[
                 "sh".to_string(),
                 "-c".to_string(),

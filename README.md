@@ -176,6 +176,16 @@ say so here than let you discover them during an audit:
   receipts, even when its private half is local. A policy with a status
   outside `trusted`/`revoked`, or naming a key whose file is missing or
   holds another key, does not load at all.
+- **Inputs are held still, and the receipt says how.** While a step runs,
+  every file and directory under its declared inputs is unwritable: by
+  permission bits for a local step, by a read-only mount for a capsule. That
+  is prevention, and the `inputs` row of the receipt's isolation block says
+  whether it was in force (not as root, not on a platform without permission
+  bits). What the bits cannot prevent, a same-user process putting them back
+  or another process on the host, the re-hash after the step detects: the run
+  refuses to write a receipt for inputs that changed. Symbolic links among
+  declared inputs are recorded as links, never followed, and a link pointing
+  outside the workspace is refused.
 - **The build never holds the key.** `attest run --sign` loads the signing
   key only after the last step has exited, so no step runs in a process that
   holds it. The key file itself is another matter: `.attest/keys/` is in the
