@@ -1380,6 +1380,47 @@ fn forging_a_trust_update_with_a_revoked_authority_is_refused() {
         .stdout(predicates::str::contains(&planted).not());
 }
 
+/// A verdict that counted a skipped check as satisfied would let a caller
+/// require recomputation, get a receipt that was never recomputed, and
+/// read "pass". The skip is honest on its own; it is the requirement that
+/// turns it into a refusal, and that is the protection: a check that did
+/// not run established nothing, whatever the reason it did not run.
+#[test]
+fn forging_acceptance_by_leaving_a_required_check_unperformed_is_refused() {
+    let dir = workspace(ONE_STEP);
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+    let receipt = run_and_receipt(dir.path());
+
+    // Required and performed: accepted. Required and not performed: the
+    // same receipt, the same bytes, refused.
+    attest()
+        .current_dir(dir.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--check-signatures",
+            "false",
+            "--recompute",
+            "--require",
+            "recompute",
+        ])
+        .assert()
+        .code(0);
+    attest()
+        .current_dir(dir.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--check-signatures",
+            "false",
+            "--require",
+            "recompute",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requirement 'recompute' not met"));
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

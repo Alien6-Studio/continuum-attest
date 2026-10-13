@@ -388,10 +388,10 @@ pub fn verify_archive(path: &Path, opts: &VerifyOptions) -> Result<ArchiveVerdic
                 detail: format!("receipt is unreadable: {err}"),
             },
         };
-        if linkage.status == CheckStatus::Fail {
-            verdict.verdict = "fail".to_string();
-        }
         verdict.checks.push(linkage);
+        // The policy is applied again now that linkage is known: a partial
+        // archive does not get to choose a weaker policy than the caller's.
+        crate::verify::apply_policy(&mut verdict, &opts.policy);
         receipts.push(verdict);
     }
 

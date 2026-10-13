@@ -207,6 +207,12 @@ mutate "a revoked authority cannot update the store" src/trust.rs \
 assert s.count(old) == 1, "revoked-issuer check moved"
 new = s.replace(old, ".is_some_and(|entry| false && entry.status == KeyStatus::Revoked)")'
 
+mutate "a skipped check does not satisfy a requirement" src/verify.rs \
+  security_invariants forging_acceptance_by_leaving_a_required_check_unperformed_is_refused \
+  'old = "        Some(c) if c.status == CheckStatus::Pass => None,"
+assert s.count(old) == 1, "check_reason pass arm moved"
+new = s.replace(old, "        Some(c) if c.status != CheckStatus::Fail => None,")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

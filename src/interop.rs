@@ -365,6 +365,8 @@ pub struct ImportOptions {
     /// otherwise launder a revoked signature past the check that `verify`
     /// applies to the receipt itself.
     pub trust_statement_time: bool,
+    /// What the caller requires; the same names as `attest verify`.
+    pub policy: crate::verify::Policy,
 }
 
 fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
@@ -422,14 +424,18 @@ pub fn import_statement_file(path: &Path, options: &ImportOptions) -> Result<Rec
         "pass"
     };
 
-    Ok(ReceiptVerdict {
+    let mut verdict = ReceiptVerdict {
         receipt: display_path,
         verdict: verdict.to_string(),
         checks,
         signed_by,
         warnings,
         trust_material: None,
-    })
+        execution: None,
+        policy: None,
+    };
+    crate::verify::apply_policy(&mut verdict, &options.policy);
+    Ok(verdict)
 }
 
 /// Parse the envelope and its payload; any shape problem is a schema-check

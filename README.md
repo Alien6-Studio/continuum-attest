@@ -54,6 +54,16 @@ if no check fails:
 | `timestamp` | Does the independent timestamp satisfy the configured trust policy? |
 | `recompute` | Do the declared inputs still hash to what the receipt recorded? |
 
+A check that did not run is reported as `skipped`, with its reason, and a
+verdict without a policy passes when nothing failed. `--require` turns that
+into a policy: `attest verify --require signature,timestamp,recompute` refuses
+unless each named property was established by a check that ran and passed.
+Skipped never satisfies a requirement, and the refusal names what was missing.
+`linkage` (archives), `trust` (a current trust bundle on record) and `success`
+(every step exited 0) can be required the same way; the verdict reports the
+execution outcome separately from the validity of the evidence, because a
+receipt of a failed build is still evidence.
+
 Exit codes are `0` pass, `1` verification failure, `2` operational error — the
 same convention across every command, so CI can branch on them.
 

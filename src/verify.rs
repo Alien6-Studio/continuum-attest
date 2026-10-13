@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::storage::{receipt_signing_bytes, Receipt};
 
@@ -31,6 +31,120 @@ pub struct VerifyOptions {
     /// revocation meant to stop them. Kept as an opt-in because receipts
     /// written before timestamping existed cannot acquire a token now.
     pub trust_receipt_timestamp: bool,
+    /// What the caller requires of the evidence, beyond "no check failed".
+    pub policy: Policy,
+}
+
+/// A property the caller can require of a verification. Each maps to one
+/// check, or to one fact the verdict already states; a requirement is met
+/// only by a check that ran and passed. A check that was skipped, had no
+/// evidence, or could not establish its property never satisfies one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Requirement {
+    /// A valid signature by a key the trust store accepts.
+    Signature,
+    /// An RFC 3161 token from a pinned authority over that signature.
+    Timestamp,
+    /// Pipeline, input and output hashes recomputed from the workspace.
+    Recompute,
+    /// Every causal reference resolves inside the archive (archives only).
+    Linkage,
+    /// A trust bundle on record whose validity window contains now.
+    Trust,
+    /// The receipt records an execution in which every step succeeded.
+    Success,
+}
+
+impl Requirement {
+    pub const ALL: [Requirement; 6] = [
+        Requirement::Signature,
+        Requirement::Timestamp,
+        Requirement::Recompute,
+        Requirement::Linkage,
+        Requirement::Trust,
+        Requirement::Success,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Requirement::Signature => "signature",
+            Requirement::Timestamp => "timestamp",
+            Requirement::Recompute => "recompute",
+            Requirement::Linkage => "linkage",
+            Requirement::Trust => "trust",
+            Requirement::Success => "success",
+        }
+    }
+}
+
+impl std::str::FromStr for Requirement {
+    type Err = String;
+    fn from_str(name: &str) -> std::result::Result<Self, String> {
+        Requirement::ALL
+            .into_iter()
+            .find(|r| r.name() == name)
+            .ok_or_else(|| {
+                format!(
+                    "unknown requirement '{name}'; expected one of {}",
+                    Requirement::ALL
+                        .iter()
+                        .map(|r| r.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
+}
+
+/// The requested verification policy: which properties must be
+/// established for the verdict to be `pass`. Empty means the default,
+/// where a verdict passes when no check failed, and a skipped check is
+/// reported rather than refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Policy {
+    pub required: Vec<Requirement>,
+}
+
+impl Policy {
+    /// Parse `--require` values: comma-separated names, repeatable.
+    pub fn parse(values: &[String]) -> std::result::Result<Policy, String> {
+        let mut required = Vec::new();
+        for value in values {
+            for name in value.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                let requirement: Requirement = name.parse()?;
+                if !required.contains(&requirement) {
+                    required.push(requirement);
+                }
+            }
+        }
+        Ok(Policy { required })
+    }
+}
+
+/// A requirement the evidence did not meet, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct Unmet {
+    pub requirement: Requirement,
+    pub reason: String,
+}
+
+/// The policy as applied: what was required, and what of that was not
+/// established. `unmet` empty with `required` non-empty is the strongest
+/// statement a verdict makes.
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyOutcome {
+    pub required: Vec<Requirement>,
+    pub unmet: Vec<Unmet>,
+}
+
+/// What the receipt says happened, as distinct from whether the receipt
+/// is valid evidence of it. A receipt of a failed build is still evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionOutcome {
+    /// `success`, `failure` or `unknown` (the receipt could not be read).
+    pub outcome: String,
+    pub failed_steps: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -78,6 +192,96 @@ pub struct ReceiptVerdict {
     /// trust store to speak of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trust_material: Option<TrustMaterial>,
+    /// What the receipt records as having happened; absent where there is
+    /// no execution to speak of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionOutcome>,
+    /// The policy that was requested and how the evidence measured up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyOutcome>,
+}
+
+/// Apply the requested policy to a verdict. Idempotent: the verdict is
+/// recomputed from the checks and the facts the verdict states, so a
+/// surface that adds a check afterwards (an archive adds linkage) applies
+/// it again and gets the right answer.
+///
+/// A requirement is met only by a check that ran and passed. Skipped is
+/// not passed; a check that did not run established nothing, whatever its
+/// reason, and a caller who required the property gets a refusal that
+/// names it.
+pub fn apply_policy(verdict: &mut ReceiptVerdict, policy: &Policy) {
+    let mut unmet = Vec::new();
+    for requirement in &policy.required {
+        let reason = match requirement {
+            Requirement::Signature | Requirement::Timestamp | Requirement::Recompute => {
+                check_reason(verdict, requirement.name())
+            }
+            Requirement::Linkage => check_reason(verdict, "chain-linkage"),
+            Requirement::Trust => match &verdict.trust_material {
+                Some(material) if material.state == "current" => None,
+                Some(material) => Some(format!(
+                    "trust material is {}; a current trust bundle is required",
+                    material.state
+                )),
+                None => Some("no trust material on this surface".to_string()),
+            },
+            Requirement::Success => match &verdict.execution {
+                Some(execution) if execution.outcome == "success" => None,
+                Some(execution) => Some(format!(
+                    "the receipt records a {} with {} failed step(s)",
+                    execution.outcome, execution.failed_steps
+                )),
+                None => Some("no execution outcome on this surface".to_string()),
+            },
+        };
+        if let Some(reason) = reason {
+            unmet.push(Unmet {
+                requirement: *requirement,
+                reason,
+            });
+        }
+    }
+    let failed = verdict.checks.iter().any(|c| c.status == CheckStatus::Fail);
+    verdict.verdict = if failed || !unmet.is_empty() {
+        "fail".to_string()
+    } else {
+        "pass".to_string()
+    };
+    verdict.policy = Some(PolicyOutcome {
+        required: policy.required.clone(),
+        unmet,
+    });
+}
+
+fn check_reason(verdict: &ReceiptVerdict, name: &str) -> Option<String> {
+    match verdict.checks.iter().find(|c| c.name == name) {
+        Some(c) if c.status == CheckStatus::Pass => None,
+        Some(c) => Some(format!(
+            "{} check {}: {}",
+            name,
+            match c.status {
+                CheckStatus::Fail => "failed",
+                _ => "not performed",
+            },
+            c.detail
+        )),
+        None => Some(format!("no {name} check on this surface")),
+    }
+}
+
+/// What the receipt says happened: every step exited 0, or not.
+pub fn execution_outcome(receipt: &Receipt) -> ExecutionOutcome {
+    let failed_steps = receipt.steps.iter().filter(|s| s.exit_code != 0).count();
+    ExecutionOutcome {
+        outcome: if failed_steps == 0 {
+            "success"
+        } else {
+            "failure"
+        }
+        .to_string(),
+        failed_steps,
+    }
 }
 
 impl ReceiptVerdict {
@@ -142,14 +346,21 @@ pub fn verify_receipt_bytes(
             for name in ["consistency", "signature", "timestamp", "recompute"] {
                 checks.push(check(name, CheckStatus::Skipped, "schema check failed"));
             }
-            return Ok(ReceiptVerdict {
+            let mut verdict = ReceiptVerdict {
                 receipt: display_path,
                 verdict: "fail".to_string(),
                 checks,
                 signed_by,
                 warnings,
                 trust_material: None,
-            });
+                execution: Some(ExecutionOutcome {
+                    outcome: "unknown".to_string(),
+                    failed_steps: 0,
+                }),
+                policy: None,
+            };
+            apply_policy(&mut verdict, &opts.policy);
+            return Ok(verdict);
         }
     }
     let receipt: Option<Receipt> = match serde_yaml::from_value(value) {
@@ -206,15 +417,26 @@ pub fn verify_receipt_bytes(
     };
 
     let trust_material = trust_material(opts, chrono::Utc::now(), &mut warnings);
+    let execution = receipt
+        .as_ref()
+        .map(execution_outcome)
+        .unwrap_or(ExecutionOutcome {
+            outcome: "unknown".to_string(),
+            failed_steps: 0,
+        });
 
-    Ok(ReceiptVerdict {
+    let mut verdict = ReceiptVerdict {
         receipt: display_path,
         verdict: verdict.to_string(),
         checks,
         signed_by,
         warnings,
         trust_material: Some(trust_material),
-    })
+        execution: Some(execution),
+        policy: None,
+    };
+    apply_policy(&mut verdict, &opts.policy);
+    Ok(verdict)
 }
 
 /// Where the revocations this verdict relied on stop being known to be

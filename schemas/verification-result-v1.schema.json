@@ -180,6 +180,78 @@
           "const": "local clock"
         }
       }
+    },
+    "execution": {
+      "description": "What the receipt records as having happened, distinct from whether the receipt is valid evidence of it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "failed_steps"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "success",
+            "failure",
+            "unknown"
+          ]
+        },
+        "failed_steps": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "policy": {
+      "description": "The verification policy that was requested and what of it the evidence did not establish. A verdict of pass with a non-empty required list means every requirement was met by a check that ran and passed; a skipped check never satisfies one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "unmet"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "signature",
+              "timestamp",
+              "recompute",
+              "linkage",
+              "trust",
+              "success"
+            ]
+          }
+        },
+        "unmet": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requirement",
+              "reason"
+            ],
+            "properties": {
+              "requirement": {
+                "enum": [
+                  "signature",
+                  "timestamp",
+                  "recompute",
+                  "linkage",
+                  "trust",
+                  "success"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

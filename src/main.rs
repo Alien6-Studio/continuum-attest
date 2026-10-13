@@ -208,6 +208,13 @@ enum Commands {
 
         #[arg(
             long,
+            value_name = "PROPERTY",
+            help = "Refuse unless this property is established: signature, timestamp, recompute, linkage, trust, success (comma-separated, repeatable)"
+        )]
+        require: Vec<String>,
+
+        #[arg(
+            long,
             default_value = "text",
             help = "Output format: text or json (NDJSON)"
         )]
@@ -274,6 +281,13 @@ enum Commands {
             help = "Accept a revoked key on the statement's own finishedOn, with no independent proof of when it was signed"
         )]
         trust_statement_time: bool,
+
+        #[arg(
+            long,
+            value_name = "PROPERTY",
+            help = "Refuse unless this property is established: signature (comma-separated, repeatable)"
+        )]
+        require: Vec<String>,
 
         #[arg(
             long,
@@ -905,6 +919,7 @@ async fn main() -> Result<()> {
             workspace,
             trust_store,
             offline,
+            require,
             format,
         } => {
             let code = handle_verify(
@@ -916,6 +931,7 @@ async fn main() -> Result<()> {
                 workspace,
                 trust_store,
                 offline,
+                require,
                 format,
             );
             std::process::exit(code);
@@ -1059,6 +1075,7 @@ async fn main() -> Result<()> {
             workspace,
             trust_store,
             trust_statement_time,
+            require,
             report,
         } => {
             let code = handle_import(
@@ -1067,6 +1084,7 @@ async fn main() -> Result<()> {
                 workspace,
                 trust_store,
                 trust_statement_time,
+                require,
                 report,
             );
             std::process::exit(code);
@@ -1507,10 +1525,18 @@ fn handle_verify(
     workspace: Option<String>,
     trust_store: Option<String>,
     _offline: bool, // all checks are local today; reserved for future remote lookups
+    require: Vec<String>,
     format: String,
 ) -> i32 {
-    use attest::verify::{verify_receipt_file, VerifyOptions};
+    use attest::verify::{verify_receipt_file, Policy, VerifyOptions};
 
+    let policy = match Policy::parse(&require) {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("error: --require: {err}");
+            return 2;
+        }
+    };
     if format != "text" && format != "json" {
         eprintln!(
             "error: unsupported --format '{}' (expected text or json)",
@@ -1546,6 +1572,7 @@ fn handle_verify(
         workspace,
         trust_store: trust_store.map(std::path::PathBuf::from),
         trust_receipt_timestamp,
+        policy,
     };
 
     if let Some(archive_path) = archive {
@@ -1680,9 +1707,18 @@ fn handle_import(
     workspace: Option<String>,
     trust_store: Option<String>,
     trust_statement_time: bool,
+    require: Vec<String>,
     report: String,
 ) -> i32 {
     use attest::interop::{import_statement_file, ImportOptions};
+
+    let policy = match attest::verify::Policy::parse(&require) {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("error: --require: {err}");
+            return 2;
+        }
+    };
 
     if format != "in-toto" {
         eprintln!(
@@ -1706,6 +1742,7 @@ fn handle_import(
         workspace,
         trust_store: trust_store.map(std::path::PathBuf::from),
         trust_statement_time,
+        policy,
     };
     let verdict = match import_statement_file(std::path::Path::new(&statement), &options) {
         Ok(verdict) => verdict,
@@ -1744,6 +1781,30 @@ fn print_verdict(verdict: &attest::verify::ReceiptVerdict, format: &str) {
         }
         if let Some(key) = &verdict.signed_by {
             println!("  signed by: {}", key);
+        }
+        if let Some(execution) = &verdict.execution {
+            println!(
+                "  execution: {}{}",
+                execution.outcome,
+                if execution.failed_steps > 0 {
+                    format!(" ({} failed step(s))", execution.failed_steps)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        if let Some(policy) = &verdict.policy {
+            if !policy.required.is_empty() {
+                let names: Vec<&str> = policy.required.iter().map(|r| r.name()).collect();
+                println!("  required: {}", names.join(", "));
+            }
+            for unmet in &policy.unmet {
+                println!(
+                    "  REFUSED: requirement '{}' not met: {}",
+                    unmet.requirement.name(),
+                    unmet.reason
+                );
+            }
         }
         if let Some(material) = &verdict.trust_material {
             match (material.state.as_str(), &material.issuer) {
