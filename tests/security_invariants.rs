@@ -1421,6 +1421,256 @@ fn forging_acceptance_by_leaving_a_required_check_unperformed_is_refused() {
         .stdout(predicates::str::contains("requirement 'recompute' not met"));
 }
 
+/// The signature has to bind every field, not only the one a reviewer
+/// would think to check. Each edit below is a different way of lying
+/// about trust: a later expiry, a bumped sequence, another issuer's name,
+/// a key swapped under a trusted entry, a revocation moved forward, an
+/// extra key, a missing one. Every one must come back as altered, from
+/// `show` and from `import`, and an import that refuses writes nothing.
+#[test]
+fn forging_any_signed_field_of_a_bundle_is_refused() {
+    let producer = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(producer.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let revoked = generate("retired");
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &revoked])
+        .assert()
+        .success();
+    let genuine = producer.path().join("bundle.json");
+    attest()
+        .current_dir(producer.path())
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            genuine.to_str().unwrap(),
+            "--key",
+            &issuer,
+        ])
+        .assert()
+        .success();
+    let original: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&genuine).unwrap()).unwrap();
+
+    // An attacker key, well formed, that the forgeries try to slip in.
+    let intruder = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(intruder.path())
+        .arg("init")
+        .assert()
+        .success();
+    let planted = {
+        let out = attest()
+            .current_dir(intruder.path())
+            .args(["keys", "generate", "--name", "planted"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let planted_bundle = intruder.path().join("theirs.json");
+    attest()
+        .current_dir(intruder.path())
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            planted_bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let theirs: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&planted_bundle).unwrap()).unwrap();
+    let planted_key = theirs["keys"][0].clone();
+    assert_eq!(planted_key["id"], planted);
+
+    let forgeries: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+        (
+            "valid_until extended",
+            Box::new(|b| {
+                b["valid_until"] = serde_json::json!("2099-01-01T00:00:00Z");
+            }),
+        ),
+        (
+            "issued_at moved",
+            Box::new(|b| {
+                b["issued_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+            }),
+        ),
+        (
+            "sequence bumped",
+            Box::new(|b| {
+                b["sequence"] = serde_json::json!(b["sequence"].as_u64().unwrap() + 1_000_000);
+            }),
+        ),
+        (
+            "issuer renamed to the planted key",
+            Box::new(|b| {
+                b["issuer"] = serde_json::json!({
+                    "key_id": planted_key["id"],
+                    "public_key": planted_key["public_key"],
+                });
+            }),
+        ),
+        (
+            "a trusted entry's key swapped",
+            Box::new(|b| {
+                let keys = b["keys"].as_array_mut().unwrap();
+                let entry = keys.iter_mut().find(|k| k["name"] == "release").unwrap();
+                entry["public_key"] = planted_key["public_key"].clone();
+                entry["id"] = planted_key["id"].clone();
+            }),
+        ),
+        (
+            "a revocation moved later",
+            Box::new(|b| {
+                let keys = b["keys"].as_array_mut().unwrap();
+                let entry = keys.iter_mut().find(|k| k["name"] == "retired").unwrap();
+                entry["revoked_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+            }),
+        ),
+        (
+            "a key added",
+            Box::new(|b| {
+                b["keys"].as_array_mut().unwrap().push(planted_key.clone());
+            }),
+        ),
+        (
+            "the revoked key removed",
+            Box::new(|b| {
+                b["keys"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|k| k["name"] != "retired");
+            }),
+        ),
+        (
+            "a key renamed",
+            Box::new(|b| {
+                let keys = b["keys"].as_array_mut().unwrap();
+                keys[0]["name"] = serde_json::json!("renamed");
+            }),
+        ),
+    ];
+
+    for (what, forge) in forgeries {
+        let mut forged = original.clone();
+        forge(&mut forged);
+        assert_ne!(forged, original, "{what}: the forgery changed nothing");
+        let path = producer.path().join("forged.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&forged).unwrap()).unwrap();
+
+        attest()
+            .current_dir(producer.path())
+            .args(["trust", "show", path.to_str().unwrap()])
+            .assert()
+            .code(1)
+            .stdout(predicates::str::contains("altered after signing").or(
+                // Renaming the issuer also breaks the issuer check; the
+                // signature still fails, which is what this test holds.
+                predicates::str::contains("signature  fail"),
+            ));
+
+        // Each import runs in a fresh process against a fresh store: the
+        // refusal has to hold with no memory of the genuine bundle.
+        let recipient = tempfile::tempdir().unwrap();
+        attest()
+            .current_dir(recipient.path())
+            .arg("init")
+            .assert()
+            .success();
+        attest()
+            .current_dir(recipient.path())
+            .args([
+                "trust",
+                "import",
+                path.to_str().unwrap(),
+                "--issuer",
+                &issuer,
+            ])
+            .assert()
+            .code(1);
+        let trust = recipient.path().join(".attest/trust");
+        assert!(
+            !trust.join("bundles").exists(),
+            "{what}: a refused bundle was recorded as accepted"
+        );
+        assert!(
+            !trust.join(format!("{planted}.pub")).exists()
+                && !trust.join(format!("{issuer}.pub")).exists(),
+            "{what}: a refused bundle left keys behind"
+        );
+    }
+}
+
+/// A bundle can be perfectly formed, current, self-consistent and signed
+/// by a key that vouches for itself, and still come from nobody the
+/// recipient ever agreed to trust. The recipient's pin, not the file, is
+/// what makes an issuer; without one, a stranger's first bundle is
+/// refused whatever it contains, and the store is left untouched.
+#[test]
+fn forging_trust_with_a_well_formed_bundle_from_an_unpinned_authority_is_refused() {
+    let stranger = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(stranger.path())
+        .arg("init")
+        .assert()
+        .success();
+    let out = attest()
+        .current_dir(stranger.path())
+        .args(["keys", "generate", "--name", "stranger"])
+        .output()
+        .unwrap();
+    let their_key = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let bundle = stranger.path().join("theirs.json");
+    attest()
+        .current_dir(stranger.path())
+        .args(["trust", "bundle", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    // Well formed by the verifier's own account.
+    attest()
+        .current_dir(stranger.path())
+        .args(["trust", "show", bundle.to_str().unwrap()])
+        .assert()
+        .code(0);
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", bundle.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("name the issuer you expect"));
+    let trust = recipient.path().join(".attest/trust");
+    assert!(!trust.join(format!("{their_key}.pub")).exists());
+    assert!(!trust.join("bundles").exists());
+    attest()
+        .current_dir(recipient.path())
+        .args(["keys", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&their_key).not());
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

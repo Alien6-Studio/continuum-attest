@@ -213,6 +213,18 @@ mutate "a skipped check does not satisfy a requirement" src/verify.rs \
 assert s.count(old) == 1, "check_reason pass arm moved"
 new = s.replace(old, "        Some(c) if c.status != CheckStatus::Fail => None,")'
 
+mutate "a bundle's signature binds every field" src/trust.rs \
+  security_invariants forging_any_signed_field_of_a_bundle_is_refused \
+  'old = "let intact = verifying_key.verify(&bytes, &signature).is_ok();"
+assert s.count(old) == 1, "bundle signature check moved"
+new = s.replace(old, "let intact = verifying_key.verify(&bytes, &signature).is_ok() || true;")'
+
+mutate "a stranger's first bundle needs a pin" src/trust.rs \
+  security_invariants forging_trust_with_a_well_formed_bundle_from_an_unpinned_authority_is_refused \
+  'old = "        None if expected_issuer.is_none() => {"
+assert s.count(old) == 1, "unpinned-issuer arm moved"
+new = s.replace(old, "        None if false => {")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());
