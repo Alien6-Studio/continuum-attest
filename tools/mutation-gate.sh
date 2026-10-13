@@ -189,6 +189,12 @@ mutate "a public key file alone is not trust" src/verify.rs \
 assert s.count(old) == 1, "presence-is-not-trust arm moved"
 new = s.replace(old, "                None => KeyTrust::Trusted,\n            });")'
 
+mutate "a bundle's signature binds its contents" src/trust.rs \
+  security_invariants forging_trust_by_editing_a_revocation_out_of_a_bundle_is_refused \
+  'old = "let intact = verifying_key.verify(&bytes, &signature).is_ok();"
+assert s.count(old) == 1, "bundle signature check moved"
+new = s.replace(old, "let intact = verifying_key.verify(&bytes, &signature).is_ok() || true;")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

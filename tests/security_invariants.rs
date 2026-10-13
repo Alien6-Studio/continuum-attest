@@ -1134,6 +1134,67 @@ fn forging_trust_by_dropping_a_public_key_into_the_trust_store_is_refused() {
         .code(0);
 }
 
+/// A bundle is how a revocation travels. Whoever carries it could edit the
+/// revoked key back to trusted on the way, and a recipient reading the
+/// file would see a well-formed bundle naming a well-formed issuer. The
+/// signature is the only thing that ties the contents to the issuer, so a
+/// bundle whose contents no longer match it must be refused outright, not
+/// reported with a caveat.
+#[test]
+fn forging_trust_by_editing_a_revocation_out_of_a_bundle_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(dir.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let stolen = generate("stolen");
+    attest()
+        .current_dir(dir.path())
+        .args(["keys", "revoke", &stolen])
+        .assert()
+        .success();
+    let bundle = dir.path().join("bundle.json");
+    attest()
+        .current_dir(dir.path())
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            bundle.to_str().unwrap(),
+            "--key",
+            &issuer,
+        ])
+        .assert()
+        .success();
+
+    // The attack: un-revoke the stolen key in transit. Drop the date too,
+    // so the edited entry looks exactly like a trusted one.
+    let text = std::fs::read_to_string(&bundle).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let keys = parsed["keys"].as_array_mut().unwrap();
+    let entry = keys.iter_mut().find(|k| k["id"] == stolen).unwrap();
+    entry["status"] = serde_json::Value::String("trusted".into());
+    entry.as_object_mut().unwrap().remove("revoked_at");
+    std::fs::write(&bundle, serde_json::to_string_pretty(&parsed).unwrap()).unwrap();
+
+    attest()
+        .current_dir(dir.path())
+        .args(["trust", "show", bundle.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("altered after signing"));
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

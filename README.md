@@ -106,6 +106,10 @@ whose receipt does not describe it — which is the point.
   authority to countersign the signature, and stores the token in the
   receipt. Verification is offline and checks it against an authority you
   pinned yourself with `attest keys trust-tsa`.
+- **Trust you can hand over.** `attest trust bundle` signs the keys your store
+  trusts and has revoked, each revocation dated, into one file with an issuer
+  and a validity window. `attest trust show` tells a recipient who issued it,
+  until when, and whether a byte of it changed, before they trust a key in it.
 - **Causal ledger.** An append-only Merkle DAG of execution events with
   inclusion proofs, queryable with `attest causal path|chain|stats`.
 - **Standard interop.** `attest export --format in-toto` emits an in-toto

@@ -107,6 +107,12 @@ enum Commands {
         action: KeysCommands,
     },
 
+    /// Trust bundles: hand your trust store to someone else, intact
+    Trust {
+        #[command(subcommand)]
+        action: TrustCommands,
+    },
+
     /// Compute a canonical attest-manifest/v1 hash for declared paths
     Hash {
         #[arg(
@@ -404,6 +410,46 @@ enum KeysCommands {
     Revoke {
         #[arg(value_name = "KEY_ID", help = "Key id to revoke")]
         key_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrustCommands {
+    /// Assemble and sign a bundle of the keys this store trusts and has revoked
+    Bundle {
+        #[arg(short, long, value_name = "FILE", help = "Where to write the bundle")]
+        output: String,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Issuer key (see 'attest keys list'); the only private key if omitted"
+        )]
+        key: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DAYS",
+            default_value = "90",
+            help = "How long the bundle stays valid"
+        )]
+        valid_for: u32,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Workspace holding .attest/ (default: current directory)"
+        )]
+        workspace: Option<String>,
+    },
+
+    /// Read a bundle and say who issued it, until when, and whether it is intact
+    Show {
+        #[arg(value_name = "BUNDLE", help = "Bundle file")]
+        bundle: String,
+
+        #[arg(long, default_value = "text", help = "Output format: text or json")]
+        format: String,
     },
 }
 
@@ -775,6 +821,8 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
 
+        Commands::Trust { action } => std::process::exit(handle_trust(action)),
+
         Commands::Keys { action } => {
             let code = handle_keys(action);
             std::process::exit(code);
@@ -1143,6 +1191,91 @@ fn handle_keys(action: KeysCommands) -> i32 {
                 2
             }
         },
+    }
+}
+
+fn handle_trust(action: TrustCommands) -> i32 {
+    match action {
+        TrustCommands::Bundle {
+            output,
+            key,
+            valid_for,
+            workspace,
+        } => {
+            let workspace = workspace
+                .map(std::path::PathBuf::from)
+                .map_or_else(std::env::current_dir, Ok)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot determine working directory: {e}");
+                    std::process::exit(2);
+                });
+            let validity = chrono::Duration::days(i64::from(valid_for));
+            match attest::trust::produce(&workspace, key.as_deref(), validity).and_then(|bundle| {
+                attest::trust::write(&bundle, std::path::Path::new(&output))?;
+                Ok(bundle)
+            }) {
+                Ok(bundle) => {
+                    eprintln!(
+                        "bundle issued by {} with {} keys, valid until {}",
+                        bundle.issuer.key_id,
+                        bundle.keys.len(),
+                        bundle.valid_until
+                    );
+                    println!("{output}");
+                    0
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    2
+                }
+            }
+        }
+
+        TrustCommands::Show { bundle, format } => {
+            if format != "text" && format != "json" {
+                eprintln!("error: --format must be text or json");
+                return 2;
+            }
+            let path = std::path::Path::new(&bundle);
+            let parsed = match attest::trust::read(path) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    return 2;
+                }
+            };
+            let report = attest::trust::report(path, &parsed, chrono::Utc::now());
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("report serializes")
+                );
+            } else {
+                println!("{}: {}", report.bundle, report.verdict);
+                println!("  issuer       {}", report.issuer.key_id);
+                println!("  issued       {}", report.issued_at);
+                println!("  valid until  {}", report.valid_until);
+                println!("  sequence     {}", report.sequence);
+                println!("  keys");
+                for key in &report.keys {
+                    let revoked = key
+                        .revoked_at
+                        .map(|at| format!(" at {at}"))
+                        .unwrap_or_default();
+                    println!("    {}  {:<20} {}{}", key.id, key.name, key.status, revoked);
+                }
+                println!("  checks");
+                for check in &report.checks {
+                    let status = if check.passed { "pass" } else { "fail" };
+                    println!("    {:<10} {:<5} {}", check.name, status, check.detail);
+                }
+            }
+            if report.verdict == "pass" {
+                0
+            } else {
+                1
+            }
+        }
     }
 }
 
