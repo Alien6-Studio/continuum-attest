@@ -54,18 +54,44 @@ if no check fails:
 | `timestamp` | Does the independent timestamp satisfy the configured trust policy? |
 | `recompute` | Do the declared inputs still hash to what the receipt recorded? |
 
+A check that did not run is reported as `skipped`, with its reason, and a
+verdict without a policy passes when nothing failed. `--require` turns that
+into a policy: `attest verify --require signature,timestamp,recompute` refuses
+unless each named property was established by a check that ran and passed.
+Skipped never satisfies a requirement, and the refusal names what was missing.
+`linkage` (archives), `trust` (a current trust bundle on record) and `success`
+(every step exited 0) can be required the same way; the verdict reports the
+execution outcome separately from the validity of the evidence, because a
+receipt of a failed build is still evidence.
+
 Exit codes are `0` pass, `1` verification failure, `2` operational error — the
 same convention across every command, so CI can branch on them.
 
+Evidence is untrusted input, and its size is the sender's choice. An archive is
+refused before anything in it is parsed if it is over 64 MiB on disk, expands
+past 512 MiB, holds more than 10 000 entries or an entry over 64 MiB; a receipt
+or a DSSE envelope over 16 MiB is refused the same way, before the YAML or JSON
+parser sees a byte. Receipts are parsed with `serde_norway`, the maintained
+fork of `serde_yaml`; attest writes no anchors or aliases, and the size cap is
+what bounds a hostile document, not the parser. The refusal is exit
+`2`, not a verdict, and `--format json` reports it as `resource-limit` so a
+consumer can tell "too big to look at" from "looked at and wrong". The archive
+limits are flags on `attest verify` (`--max-archive-bytes`,
+`--max-unpacked-bytes`, `--max-entries`, `--max-entry-bytes`) for the rare
+legitimate archive that needs more.
+
 `attest verify --format json RECEIPT` emits one NDJSON record per receipt file. The
 [verification result v1 schema](schemas/verification-result-v1.schema.json)
-defines its fields and five named checks (archive and interop results have
+defines its fields: five named checks, and the optional `policy`, `execution`
+and `trust_material` objects that 0.2 added (archive and interop results have
 separate contracts). Rust clients can load it from
 `attest::verify::VERDICT_JSON_SCHEMA`. Schema validity is structural, not
 permission to accept an artifact: a `pass` can include skipped checks or warnings.
 Consumers must bind the receipt and signer they expect and enforce their own
-required checks and warning policy. Operational errors use stderr and exit 2,
-not a fabricated JSON verification result.
+required checks and warning policy. An operational error is exit 2 and a line
+on stderr; in JSON mode it is also one record with `"verdict": "error"` and the
+error kind (`resource-limit` or `operational`), never a fabricated verification
+result.
 
 ## A pipeline
 
@@ -106,6 +132,17 @@ whose receipt does not describe it — which is the point.
   authority to countersign the signature, and stores the token in the
   receipt. Verification is offline and checks it against an authority you
   pinned yourself with `attest keys trust-tsa`.
+- **Trust you can hand over.** `attest trust bundle` signs the keys your store
+  trusts and has revoked, each revocation dated, into one file with an issuer
+  and a validity window. `attest trust show` tells a recipient who issued it,
+  until when, and whether a byte of it changed; `attest trust import` takes it
+  into their store, naming the issuer they expect the first time, refuses an
+  older bundle than the one already accepted, and says which keys arrived and
+  which were revoked. An authority stepping down names its successor in its
+  own signed bundle, so the recipient sees the handover rather than a
+  stranger; a bundle from an authority the recipient revoked is refused
+  whatever it says. Verification stays offline: trust material travels as a
+  file, it is never fetched.
 - **Causal ledger.** An append-only Merkle DAG of execution events with
   inclusion proofs, queryable with `attest causal path|chain|stats`.
 - **Standard interop.** `attest export --format in-toto` emits an in-toto
@@ -118,13 +155,18 @@ whose receipt does not describe it — which is the point.
   single command, no pipeline file needed. This is how you adopt it inside an
   existing CI job without rewriting it.
 - **Container images.** `attest image sign|verify` wraps cosign and checks SBOM
-  (SPDX), SLSA provenance, and revision binding.
+  (SPDX), SLSA provenance, and revision binding, under one policy: every
+  property a flag asks for must be established, a required check is never
+  skipped, and a verification that checks nothing does not run. Signatures are
+  verified against a key, or keyless against a named `--certificate-identity`
+  from a named `--certificate-oidc-issuer`; never against "any valid identity".
 
 ## What it does not claim
 
 A receipt establishes **internal consistency**, verifiable by a third party
-against your source. Two properties are still missing, and we would rather
-say so here than let you discover them during an audit:
+against your source. Some properties are still missing, and several guarantees
+are narrower than their names suggest; we would rather say so here than let
+you discover it during an audit:
 
 - **The causal root is anchored, but never published.** The root is covered by
   the receipt's signature, and `--timestamp` puts an RFC 3161 authority over
@@ -141,11 +183,56 @@ say so here than let you discover them during an audit:
   receipts, even when its private half is local. A policy with a status
   outside `trusted`/`revoked`, or naming a key whose file is missing or
   holds another key, does not load at all.
-- **Revoking a key does not reach anyone else.** `attest keys revoke` writes to
-  your local trust store. A third party verifying your receipt reads their own
-  copy, and nothing tells them it is out of date — there is no distribution
-  mechanism and no notion of freshness. Revocation protects a verifier who
-  already has it; it does not travel on its own.
+- **Inputs are held still only inside a capsule, and the receipt says so.**
+  A capsule step reads its declared inputs from a snapshot copied and hashed
+  when the receipt's input hash was taken, mounted read-only at the input's
+  top-level directory: a mount point cannot be renamed or replaced from
+  inside, and under that directory the step sees the declared inputs only, so
+  outputs cannot be written there. The snapshot is outside the writable
+  workspace, so a step cannot reach it through another writable path. The runtime refuses writes from inside, and changes to the
+  original workspace during the step never reach its view. Capsule input paths
+  must name paths below the workspace root, relative without `..` (`.` and
+  empty paths are refused), and symbolic links must use relative targets
+  covered by the declared inputs. That is enforced, and the `inputs` row of the
+  receipt's isolation block says `enforced` only when every step ran in a
+  capsule. A local step gets its inputs' write bits dropped while it runs, which
+  refuses a plain write and nothing more: a step that puts the bits back,
+  changes an input, uses it and restores it before it ends is not caught,
+  because the re-hash after the step sees the restored file. The row says
+  `not-enforced` for such runs and says why. Changes still present after the
+  step are detected and the run refuses to write a receipt. Symbolic links
+  among declared inputs are recorded as links, never followed; a link pointing
+  outside the workspace is refused, and so is one whose target is not itself
+  declared, because the bytes behind it would not be attested.
+- **The build never holds the key.** `attest run --sign` loads the signing
+  key only after the last step has exited, so no step runs in a process that
+  holds it. The key file itself is another matter: `.attest/keys/` is in the
+  workspace, readable by anything running as you, which is why
+  `ATTEST_KEYS_DIR` can point outside it and why a release signs in a separate
+  job. There, `attest sign` signs receipts produced by a job that had no key,
+  in a job that runs nothing the project controls. The signing boundary is
+  that job: it is the one component trusted to authorize a receipt.
+- **"Isolated" is a list, not a word.** `--verify` runs steps under process
+  isolation, which enforces memory and open-file limits and timeouts when they
+  are configured, and nothing else: no network control, no filesystem control,
+  no capability drop. A capsule is the container path: `--network none`, a
+  read-only root, declared-only environment, declared inputs mounted
+  read-only. The library's container and strict-container modes (seccomp
+  profile, dropped capabilities) are not exposed on the command line in this
+  release. Every receipt carries an `isolation` block naming each control as
+  enforced, not enforced or not available on that platform, so a recipient
+  reads what was in force rather than inferring it from a mode's name.
+- **Revocation travels only as far as a bundle is carried.** `attest keys
+  revoke` writes to your local trust store; a recipient learns of it when
+  they import a bundle you issued afterwards. Nothing pushes that bundle to
+  them, and nothing fetches it: trust material moves as a file, by a channel
+  you both chose. A revocation only ever moves earlier: a later bundle that
+  dates it sooner tightens it, one that dates it later changes nothing. A local
+  revocation without a date rejects every signature and stays in force when a
+  dated revocation arrives. What the verifier can say is how current its material is,
+  the bundle its revocations are known up to and whether that bundle has
+  expired, and it says so in every verdict. Revocation protects a verifier
+  who has refreshed; it does not reach one who has not.
 
 **Time is worth what `--timestamp` makes it worth.** Without it, a receipt's
 timestamp is written by the runner and covered by the runner's own signature,
@@ -153,7 +240,12 @@ so it asserts nothing to anyone who does not already trust the runner — and
 revocation, which compares against that time, is no stronger. With
 `--timestamp`, the time comes from an RFC 3161 authority the signer does not
 control, revocation is judged against that, and `attest verify` refuses a
-revoked key's signature that carries no such proof.
+revoked key's signature that carries no such proof. That is the only check
+that uses a time the signer did not choose. Whether a trust bundle has expired
+is judged by the verifier's own clock, and the verdict says so: it states the
+bundle its revocations are current up to, and warns when that bundle has
+expired, because a verifier offline for a year cannot honestly claim to know
+about revocations issued last week.
 
 Attestation is also not compliance. A green `attest verify` says the artifact
 matches the source; it says nothing about whether either is any good.
@@ -166,26 +258,48 @@ hardening that protects private keys is Unix-specific and has no Windows
 equivalent yet, so a Windows build would write key material with inherited
 ACLs.
 
-Building from source requires Rust **1.88** or later (the MSRV is declared in
+Building from source requires Rust **1.89** or later (the MSRV is declared in
 `Cargo.toml` and tested in CI):
 
 ```console
-$ cargo install continuum-attest
+$ cargo install continuum-attest --locked
 ```
 
 The crate is published as `continuum-attest` — `attest` was taken on crates.io
-by an unrelated project — but the installed command is `attest`.
+by an unrelated project — but the installed command is `attest`. `--locked`
+installs the dependency graph that was tested and reviewed for that version,
+from the `Cargo.lock` shipped in the package; without it cargo resolves
+whatever is newest today, which is a graph nobody tested. CI installs every
+release from its own package this way.
+
+Three things are reproducible, and they are not the same thing. The *source
+dependencies* are: the lock pins every crate by version and checksum. The
+*toolchain* is: release artifacts are built with the compiler version pinned in
+the workflows, and each binary ships with a `build-info.json` naming the
+`rustc` release and commit, the target, and the lock's digest. The *artifact
+bytes* are reproducible per platform for the same tag and toolchain, which the
+release workflow holds itself to; across platforms they differ by nature.
 
 Signed release binaries are published on the
 [releases page](https://github.com/Alien6-Studio/continuum-attest/releases) with
-checksums, an SBOM, and SLSA provenance. It would be strange for this project in
-particular to ask you to trust an unattested download.
+checksums, an SBOM, build inputs, the source package and SLSA provenance. One
+signed, timestamped attest receipt covers that whole set, byte for byte: the
+publish step recomputes the receipt's input manifest over the files it is about
+to publish and refuses the release on any difference, so the checksums, the
+SBOM, the provenance and the receipt describe the same artifacts, not merely
+the same source revision. It would be strange for this project in particular
+to ask you to trust an unattested download.
 
 ## Status
 
-Version 0.1. The core — pipelines, hashing, capsules, receipts, trust store,
+Version 0.2. The core — pipelines, hashing, capsules, receipts, trust store,
 verification, causal ledger, in-toto/SLSA interop — is implemented and covered
-by the test suite, and `attest` attests its own CI on every commit.
+by the test suite, and `attest` attests its own CI on every commit. 0.2 adds
+trust that can be shared: signed trust bundles with pinned issuers, handover
+and rollback protection, verdicts under an explicit policy that name what they
+could not establish, a receipt that says which isolation controls were in
+force, inputs held still while a step runs, and a release whose evidence is
+bound to the exact bytes it publishes and signed in a job that builds nothing.
 
 Interfaces that carry a `schema_version` (receipts, `attest.yaml`) follow a
 documented compatibility policy: older receipts stay verifiable, and a receipt
@@ -199,7 +313,10 @@ published there too:
 - [Receipt format](https://attest.continuu.ms/en/docs/receipt-format/) — the receipt wire format, the `attest-manifest/v1`
   hashing rules, the canonical signing bytes and the trust store. Specified in
   enough detail to write an independent verifier without reading the Rust,
-  which is what "anyone can check it" has to mean.
+  which is what "anyone can check it" has to mean. The trust bundle format
+  and the receipt's `isolation` block are new in 0.2; until their pages are
+  published there, `src/trust.rs` and `src/sandbox/mod.rs` carry the
+  normative description, and `schemas/` the JSON contract.
 - [Plugin protocol](https://attest.continuu.ms/en/docs/plugin-protocol/) — the
   boundary a plugin may not cross. A specification, not a feature of this
   release: `attest` spawns nothing.

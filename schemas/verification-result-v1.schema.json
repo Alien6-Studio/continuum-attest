@@ -135,6 +135,130 @@
           }
         }
       ]
+    },
+    "trust_material": {
+      "description": "How current the revocations behind this verdict are: the most recently accepted trust bundle, judged by the verifier's own clock, not by trusted time. Absent on emitters that predate trust bundles.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "issuer",
+        "sequence",
+        "valid_until",
+        "judged_by"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "none",
+            "current",
+            "expired",
+            "not-yet-valid"
+          ]
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "sequence": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "valid_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "judged_by": {
+          "const": "local clock"
+        }
+      }
+    },
+    "execution": {
+      "description": "What the receipt records as having happened, distinct from whether the receipt is valid evidence of it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "failed_steps"
+      ],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "success",
+            "failure",
+            "unknown"
+          ]
+        },
+        "failed_steps": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "policy": {
+      "description": "The verification policy that was requested and what of it the evidence did not establish. A verdict of pass with a non-empty required list means every requirement was met by a check that ran and passed; a skipped check never satisfies one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "unmet"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "signature",
+              "timestamp",
+              "recompute",
+              "linkage",
+              "trust",
+              "success",
+              "sbom",
+              "provenance",
+              "revision"
+            ]
+          }
+        },
+        "unmet": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requirement",
+              "reason"
+            ],
+            "properties": {
+              "requirement": {
+                "enum": [
+                  "signature",
+                  "timestamp",
+                  "recompute",
+                  "linkage",
+                  "trust",
+                  "success",
+                  "sbom",
+                  "provenance",
+                  "revision"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -25,7 +25,7 @@ fn test_attest_help_and_version() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::str::contains("attest"))
-        .stdout(predicate::str::contains("0.1.0"));
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 
     let mut cmd = Command::cargo_bin("attest")?;
     cmd.arg("--help")

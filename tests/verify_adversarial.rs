@@ -78,6 +78,7 @@ fn timestamp_check(dir: &Path, yaml: &str, issuer: Option<&str>) -> (CheckStatus
         workspace: dir.to_path_buf(),
         trust_store: Some(trust_store(dir, issuer)),
         trust_receipt_timestamp: false,
+        policy: Default::default(),
     };
     let verdict = verify_receipt_bytes(yaml.as_bytes(), "case", &opts).expect("verifier runs");
     let check = verdict
@@ -184,6 +185,7 @@ fn no_truncation_of_a_real_token_ever_verifies() {
             workspace: dir.path().to_path_buf(),
             trust_store: Some(trust.clone()),
             trust_receipt_timestamp: false,
+            policy: Default::default(),
         };
         let verdict = verify_receipt_bytes(yaml.as_bytes(), "case", &opts).expect("verifier runs");
         let check = verdict

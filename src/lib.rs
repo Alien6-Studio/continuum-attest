@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod provenance;
 pub mod sandbox;
 pub mod storage;
+pub mod trust;
 pub mod util;
 pub mod verify;
 pub mod wrap;

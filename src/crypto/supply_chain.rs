@@ -37,6 +37,41 @@ pub struct SupplyChainRequest {
     /// Verification key: `azurekms://…` (exported first, IMG-10) or a
     /// public-key file path. Enables the signature check.
     pub key_uri: Option<String>,
+    /// Keyless verification: the certificate identity the signature must
+    /// carry. Only meaningful with `certificate_oidc_issuer`; a keyless
+    /// check never accepts "any valid identity".
+    pub certificate_identity: Option<String>,
+    /// Keyless verification: the OIDC issuer that identity must come from.
+    pub certificate_oidc_issuer: Option<String>,
+}
+
+impl SupplyChainRequest {
+    /// Whether a signature check will run: a key, or a pinned identity
+    /// and issuer. Nothing in between.
+    pub fn signature_requested(&self) -> bool {
+        self.key_uri.is_some()
+            || (self.certificate_identity.is_some() && self.certificate_oidc_issuer.is_some())
+    }
+
+    /// The policy this request enforces, as the report states it: every
+    /// property a flag asked for, by the same names `attest verify` uses.
+    pub fn required(&self) -> Vec<crate::verify::Requirement> {
+        use crate::verify::Requirement;
+        let mut required = Vec::new();
+        if self.require_sbom {
+            required.push(Requirement::Sbom);
+        }
+        if self.require_provenance {
+            required.push(Requirement::Provenance);
+        }
+        if self.expected_revision.is_some() {
+            required.push(Requirement::Revision);
+        }
+        if self.signature_requested() {
+            required.push(Requirement::Signature);
+        }
+        required
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,6 +123,11 @@ pub struct SupplyChainReport {
     pub image: String,
     pub verdict: String,
     pub checks: Vec<CheckResult>,
+    /// What was required and what of it was not established. Derived
+    /// from the request, so the policy the report states is the policy
+    /// that ran: a required check is never skipped, and a skipped check
+    /// is never required.
+    pub policy: crate::verify::PolicyOutcome,
 }
 
 impl SupplyChainReport {
@@ -244,6 +284,13 @@ pub fn check_revision_binding(
     Ok(if compared == 0 { None } else { Some(compared) })
 }
 
+/// How a signature is to be verified: against a key, or against a pinned
+/// keyless identity. There is no "any valid signature" variant on purpose.
+enum Signer {
+    Key(String),
+    Identity { identity: String, issuer: String },
+}
+
 /// Shells out to `docker buildx imagetools inspect` and `cosign`.
 /// Split from the pure validators so tests can drive them on fixtures.
 pub struct SupplyChainVerifier {
@@ -353,16 +400,30 @@ impl SupplyChainVerifier {
         Ok((dir, public_key))
     }
 
-    /// IMG-9: `cosign verify --key <key> [-a continuum.git.revision=<rev>] <ref>`.
+    /// IMG-9: `cosign verify --key <key> [-a continuum.git.revision=<rev>] <ref>`,
+    /// or keyless with `--certificate-identity <id> --certificate-oidc-issuer <issuer>`.
     fn verify_signature(
         &self,
         cosign: &str,
-        key: &str,
+        signer: &Signer,
         expected_revision: Option<&str>,
         image_ref: &str,
     ) -> Result<(), String> {
         let mut cmd = Command::new(cosign);
-        cmd.args(["verify", "--key", key]);
+        cmd.arg("verify");
+        match signer {
+            Signer::Key(key) => {
+                cmd.args(["--key", key]);
+            }
+            Signer::Identity { identity, issuer } => {
+                cmd.args([
+                    "--certificate-identity",
+                    identity,
+                    "--certificate-oidc-issuer",
+                    issuer,
+                ]);
+            }
+        }
         if let Some(revision) = expected_revision {
             cmd.arg("-a")
                 .arg(format!("{REVISION_ANNOTATION}={revision}"));
@@ -434,9 +495,14 @@ impl SupplyChainVerifier {
                     "revision",
                     format!("{count} SLSA v1 document(s) record revision {expected}"),
                 ),
-                Ok(None) => CheckResult::skipped(
+                // A revision was required and nothing in the provenance
+                // can be held to it: that is missing evidence, not a check
+                // to skip.
+                Ok(None) => CheckResult::fail(
                     "revision",
-                    "no SLSA v1 document carries a vcs.revision to compare".to_string(),
+                    format!(
+                        "no SLSA v1 document carries a vcs.revision to compare against {expected}"
+                    ),
                 ),
                 Err(detail) => CheckResult::fail("revision", detail),
             });
@@ -447,30 +513,53 @@ impl SupplyChainVerifier {
             ));
         }
 
-        // IMG-9/IMG-10: signature with optional revision annotation.
-        if let Some(key_uri) = &request.key_uri {
+        // IMG-9/IMG-10: signature with optional revision annotation, by
+        // key or by a pinned keyless identity.
+        let signer = if let Some(key_uri) = &request.key_uri {
+            Some(Signer::Key(key_uri.clone()))
+        } else {
+            match (
+                &request.certificate_identity,
+                &request.certificate_oidc_issuer,
+            ) {
+                (Some(identity), Some(issuer)) => Some(Signer::Identity {
+                    identity: identity.clone(),
+                    issuer: issuer.clone(),
+                }),
+                _ => None,
+            }
+        };
+        if let Some(signer) = signer {
             let cosign = self.cosign.as_deref().expect("cosign located");
             // Keep the exported-key tempdir alive for the verify call.
-            let (kms_guard, verification_key) = if key_uri.starts_with("azurekms://") {
-                let (guard, path) = self.export_kms_public_key(cosign, key_uri)?;
-                (Some(guard), path.to_string_lossy().to_string())
-            } else {
-                (None, key_uri.clone())
+            let (kms_guard, signer) = match signer {
+                Signer::Key(key_uri) if key_uri.starts_with("azurekms://") => {
+                    let (guard, path) = self.export_kms_public_key(cosign, &key_uri)?;
+                    (Some(guard), Signer::Key(path.to_string_lossy().to_string()))
+                }
+                other => (None, other),
             };
             checks.push(
                 match self.verify_signature(
                     cosign,
-                    &verification_key,
+                    &signer,
                     request.expected_revision.as_deref(),
                     &request.image_ref,
                 ) {
                     Ok(()) => CheckResult::pass(
                         "signature",
-                        match &request.expected_revision {
-                            Some(revision) => format!(
+                        match (&signer, &request.expected_revision) {
+                            (Signer::Key(_), Some(revision)) => format!(
                                 "cosign signature valid with {REVISION_ANNOTATION}={revision}"
                             ),
-                            None => "cosign signature valid".to_string(),
+                            (Signer::Key(_), None) => "cosign signature valid".to_string(),
+                            (Signer::Identity { identity, issuer }, Some(revision)) => format!(
+                                "cosign signature valid for {identity} issued by {issuer} with \
+                                 {REVISION_ANNOTATION}={revision}"
+                            ),
+                            (Signer::Identity { identity, issuer }, None) => {
+                                format!("cosign signature valid for {identity} issued by {issuer}")
+                            }
                         },
                     ),
                     Err(detail) => CheckResult::fail("signature", detail),
@@ -480,11 +569,25 @@ impl SupplyChainVerifier {
         } else {
             checks.push(CheckResult::skipped(
                 "signature",
-                "not enforced (pass --key)".to_string(),
+                "not enforced (pass --key, or --certificate-identity with --certificate-oidc-issuer)"
+                    .to_string(),
             ));
         }
 
-        let verdict = if checks.iter().any(|c| c.status == CheckStatus::Fail) {
+        // One policy model: the verdict is derived from what was required,
+        // and a required check that did not pass is named.
+        let required = request.required();
+        let unmet: Vec<crate::verify::Unmet> = required
+            .iter()
+            .filter_map(|requirement| {
+                let check = checks.iter().find(|c| c.name == requirement.name())?;
+                (check.status != CheckStatus::Pass).then(|| crate::verify::Unmet {
+                    requirement: *requirement,
+                    reason: format!("{} check failed: {}", check.name, check.detail),
+                })
+            })
+            .collect();
+        let verdict = if checks.iter().any(|c| c.status == CheckStatus::Fail) || !unmet.is_empty() {
             "fail"
         } else {
             "pass"
@@ -493,6 +596,7 @@ impl SupplyChainVerifier {
             image: request.image_ref.clone(),
             verdict: verdict.to_string(),
             checks,
+            policy: crate::verify::PolicyOutcome { required, unmet },
         })
     }
 }
@@ -524,6 +628,13 @@ fn verification_input_manifest(request: &SupplyChainRequest) -> String {
     }
     if let Some(key) = &request.key_uri {
         manifest.push_str(&format!("key:{key}\n"));
+    }
+    if let (Some(identity), Some(issuer)) = (
+        &request.certificate_identity,
+        &request.certificate_oidc_issuer,
+    ) {
+        manifest.push_str(&format!("certificate-identity:{identity}\n"));
+        manifest.push_str(&format!("certificate-oidc-issuer:{issuer}\n"));
     }
     manifest
 }
@@ -564,12 +675,13 @@ pub fn write_verification_receipt(
         total_duration_secs: 0,
         signature: None,
         signer_public_key: None,
-        attest_version: "0.1.0".to_string(),
+        attest_version: env!("CARGO_PKG_VERSION").to_string(),
         causal_events: vec![],
         causal_chain_hash: None,
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     if options.sign_receipt {
@@ -807,6 +919,8 @@ mod tests {
             require_provenance: false,
             expected_revision: Some(REVISION.to_string()),
             key_uri: Some("azurekms://v/keys/k/1".to_string()),
+            certificate_identity: None,
+            certificate_oidc_issuer: None,
         };
         assert_eq!(
             verification_input_manifest(&request),
@@ -836,6 +950,13 @@ mod tests {
                 "sbom",
                 "packages is not an array".to_string(),
             )],
+            policy: crate::verify::PolicyOutcome {
+                required: vec![crate::verify::Requirement::Sbom],
+                unmet: vec![crate::verify::Unmet {
+                    requirement: crate::verify::Requirement::Sbom,
+                    reason: "sbom check failed: packages is not an array".to_string(),
+                }],
+            },
         };
 
         let path = write_verification_receipt(

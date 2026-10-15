@@ -249,7 +249,7 @@ async fn test_executor_creation_and_basic_execution() -> Result<()> {
 
     // Verify receipt
     assert_eq!(receipt.steps.len(), 3);
-    assert_eq!(receipt.attest_version, "0.1.0");
+    assert_eq!(receipt.attest_version, env!("CARGO_PKG_VERSION"));
     // Steps run in well under a second, so this whole-second counter can
     // legitimately be 0 - just sanity-check it's a valid (non-negative) value.
     let _ = receipt.total_duration_secs;
@@ -295,6 +295,7 @@ async fn test_isolated_execution_mode() -> Result<()> {
             container_config: None,
             seccomp_profile: Some("minimal".to_string()),
             security_level: attest::sandbox::SecurityLevel::Minimal,
+            inherit_environment: true,
         }),
         ..ExecutorConfig::default()
     };
@@ -696,6 +697,7 @@ async fn test_resource_constraints() -> Result<()> {
             container_config: None,
             seccomp_profile: Some("minimal".to_string()),
             security_level: attest::sandbox::SecurityLevel::Minimal,
+            inherit_environment: true,
         }),
         ..ExecutorConfig::default()
     };

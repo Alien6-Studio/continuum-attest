@@ -36,6 +36,12 @@ pub enum HashingError {
     #[error("symlink '{path}' escapes the workspace root (target: {target})")]
     SymlinkEscape { path: PathBuf, target: String },
 
+    #[error(
+        "symlink '{path}' points to '{target}', which is not under any declared path of this step; \
+         the bytes it leads to would not be attested. Declare the target or remove the link"
+    )]
+    SymlinkUndeclared { path: PathBuf, target: String },
+
     #[error("path '{path}' cannot be represented in a manifest: {reason}")]
     InvalidPath { path: PathBuf, reason: String },
 
@@ -198,10 +204,10 @@ fn collect_entries(
                 if file_type.is_dir() {
                     continue;
                 }
-                add_entry(&workspace, entry.path(), &mut entries)?;
+                add_entry(&workspace, entry.path(), declared, &mut entries)?;
             }
         } else {
-            add_entry(&workspace, &abs, &mut entries)?;
+            add_entry(&workspace, &abs, declared, &mut entries)?;
         }
     }
 
@@ -211,6 +217,7 @@ fn collect_entries(
 fn add_entry(
     workspace: &Path,
     abs: &Path,
+    declared: &[PathBuf],
     entries: &mut BTreeMap<String, String>,
 ) -> Result<(), HashingError> {
     let normalized = normalize_relative(workspace, abs)?;
@@ -231,7 +238,21 @@ fn add_entry(
                 reason: "symlink target is not valid UTF-8".to_string(),
             })?
             .to_string();
-        check_symlink_containment(workspace, abs, &target, &target_str)?;
+        let resolved = check_symlink_containment(workspace, abs, &target, &target_str)?;
+        // A link is recorded as a link, never followed. The bytes behind it
+        // are attested only if its target lies under a declared path, so a
+        // link to anywhere else is refused: a step would read bytes the
+        // manifest does not cover.
+        let covered = declared.iter().any(|d| {
+            let root = lexical_normalize(&workspace.join(d));
+            resolved == root || resolved.starts_with(&root)
+        });
+        if !covered {
+            return Err(HashingError::SymlinkUndeclared {
+                path: abs.to_path_buf(),
+                target: target_str,
+            });
+        }
         format!("l:{}", blake3::hash(target_str.as_bytes()).to_hex())
     } else {
         format!("f:{}", hash_file_streaming(abs)?)
@@ -264,7 +285,7 @@ fn check_symlink_containment(
     link: &Path,
     target: &Path,
     target_str: &str,
-) -> Result<(), HashingError> {
+) -> Result<PathBuf, HashingError> {
     let resolved = if target.is_absolute() {
         lexical_normalize(target)
     } else {
@@ -277,7 +298,7 @@ fn check_symlink_containment(
             target: target_str.to_string(),
         });
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// Purely lexical normalization: removes `.` and resolves `..` against the
@@ -436,17 +457,36 @@ mod tests {
         write(t.path(), "a", "v1");
         std::os::unix::fs::symlink("a", t.path().join("s")).unwrap();
 
-        let h1 = hash_inputs(t.path(), "s", "cmd", &paths(&["s"])).unwrap();
-        write(t.path(), "a", "v2");
-        let h2 = hash_inputs(t.path(), "s", "cmd", &paths(&["s"])).unwrap();
-        assert_eq!(
-            h1, h2,
-            "symlink line must hash the target string, not content"
+        // The link alone is refused: its target is not declared, so the
+        // bytes it leads to would not be attested.
+        let err = hash_inputs(t.path(), "s", "cmd", &paths(&["s"])).unwrap_err();
+        assert!(
+            matches!(err, HashingError::SymlinkUndeclared { .. }),
+            "{err}"
         );
 
+        // Declared with its target, the link is recorded as a link: its
+        // line hashes the target string, not the content, which the
+        // target's own line covers.
+        let link_line = |manifest: &str| {
+            manifest
+                .lines()
+                .find(|l| l.starts_with("l:"))
+                .map(str::to_string)
+                .expect("a link line")
+        };
+        let m1 = input_manifest(t.path(), "s", "cmd", &paths(&["s", "a"])).unwrap();
+        write(t.path(), "a", "v2");
+        let m2 = input_manifest(t.path(), "s", "cmd", &paths(&["s", "a"])).unwrap();
+        assert_eq!(
+            link_line(&m1),
+            link_line(&m2),
+            "symlink line must hash the target string, not content"
+        );
+        assert_ne!(m1, m2, "the declared target's own line follows its content");
+
         let target_line_hash = blake3::hash(b"a").to_hex().to_string();
-        let manifest = input_manifest(t.path(), "s", "cmd", &paths(&["s"])).unwrap();
-        assert!(manifest.contains(&format!("l:{target_line_hash} s")));
+        assert!(m2.contains(&format!("l:{target_line_hash} s")));
     }
 
     #[cfg(unix)]

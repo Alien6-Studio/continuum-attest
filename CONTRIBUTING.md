@@ -74,7 +74,9 @@ Three more run in CI:
   receipt with `attest run --verify`. Reproduce it the same way. It runs
   unsigned: the signing key lives in a protected environment that only a
   tagged release can reach, so no pull request, from a fork or not, can sign
-  anything.
+  anything. A release signs the same way, in a job of its own: the job that
+  runs project commands holds no key, and the job that holds the key runs
+  `attest sign` on receipts it did not produce.
 
 ## Things that will get a PR sent back
 
@@ -93,7 +95,12 @@ panic there is a denial of service on the one operation users depend on. Return
 a typed error and let the caller decide.
 
 **Keep the exit-code convention.** `0` success, `1` a verification-meaningful
-failure, `2` an operational error. CI pipelines branch on these.
+failure, `2` an operational error. CI pipelines branch on these. An option
+that cannot take effect in the selected mode (`--timestamp` without `--sign`,
+`--key` without `--sign`, a `--wrap`-only option without `--wrap`) is a `2`
+refused before any project command runs, never silently ignored. Declare such
+a pairing as a `Prerequisite` in `src/main.rs`, next to the others, rather
+than checking it in the code that would eventually fail to honour it.
 
 **New behaviour needs a test.** Integration tests live in `tests/` and drive the
 real binary through `assert_cmd`. If you are fixing a bug, the test should fail

@@ -43,6 +43,12 @@ pub struct Receipt {
     /// signature, not from ours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_token: Option<String>,
+    /// Which isolation controls were in force for this run, control by
+    /// control, and which were not. Absent on receipts written before it
+    /// existed; those say nothing about isolation, which is the truth.
+    /// Inside the signed bytes, like every other claim the receipt makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<crate::sandbox::IsolationReport>,
 }
 
 /// Result of a double-build reproducibility check attached to a receipt.
@@ -172,12 +178,13 @@ mod tests {
             total_duration_secs: 1,
             signature: None,
             signer_public_key: None,
-            attest_version: "0.1.0".to_string(),
+            attest_version: env!("CARGO_PKG_VERSION").to_string(),
             causal_events: vec![],
             causal_chain_hash: None,
             reproducibility: None,
             provenance: None,
             timestamp_token: None,
+            isolation: None,
         }
     }
 

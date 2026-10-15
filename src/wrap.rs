@@ -184,6 +184,7 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
         reproducibility: None,
         provenance: Some(provenance),
         timestamp_token: None,
+        isolation: None,
     };
 
     if options.sign {

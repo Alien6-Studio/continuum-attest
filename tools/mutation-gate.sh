@@ -51,6 +51,8 @@ trap restore EXIT
 # truth and names the fix.
 mutate () {
   local name=$1 file=$2 suite=$3 expect=$4 script=$5
+  local target=(--test "$suite")
+  if [ "$suite" = lib ]; then target=(--lib); fi
   CHECKED=$((CHECKED + 1))
 
   if ! python3 - "$file" <<PY
@@ -74,7 +76,7 @@ PY
   # merely broke the build as a protection verified. That is the exact
   # failure this gate exists to catch, so it is checked for here first.
   local output
-  if ! output=$($CARGO test --locked --no-run --test "$suite" 2>&1); then
+  if ! output=$($CARGO test --locked --no-run "${target[@]}" 2>&1); then
     echo "FAIL  ${name}: the mutated tree does not build, so nothing was tested" >&2
     echo "$output" | grep -E "^error" | head -3 >&2
     FAILURES=$((FAILURES + 1))
@@ -82,7 +84,7 @@ PY
     return
   fi
 
-  output=$($CARGO test --locked --test "$suite" "$expect" 2>&1)
+  output=$($CARGO test --locked "${target[@]}" "$expect" 2>&1)
   local status=$?
 
   # A filter that matches nothing runs zero tests and exits zero, which would
@@ -188,6 +190,152 @@ mutate "a public key file alone is not trust" src/verify.rs \
   'old = "                None => KeyTrust::Unknown,\n            });"
 assert s.count(old) == 1, "presence-is-not-trust arm moved"
 new = s.replace(old, "                None => KeyTrust::Trusted,\n            });")'
+
+mutate "a bundle's signature binds its contents" src/trust.rs \
+  security_invariants forging_trust_by_editing_a_revocation_out_of_a_bundle_is_refused \
+  'old = "let intact = verifying_key.verify(&bytes, &signature).is_ok();"
+assert s.count(old) == 1, "bundle signature check moved"
+new = s.replace(old, "let intact = verifying_key.verify(&bytes, &signature).is_ok() || true;")'
+
+mutate "an older bundle than the accepted one is a replay" src/trust.rs \
+  security_invariants forging_freshness_by_replaying_an_older_bundle_is_refused \
+  'old = "Some(previous) if bundle.sequence < previous.sequence => bail!("
+assert s.count(old) == 1, "bundle sequence check moved"
+new = s.replace(old, "Some(previous) if false && bundle.sequence < previous.sequence => bail!(")'
+
+mutate "a revoked authority cannot update the store" src/trust.rs \
+  security_invariants forging_a_trust_update_with_a_revoked_authority_is_refused \
+  'old = ".is_some_and(|entry| entry.status == KeyStatus::Revoked)"
+assert s.count(old) == 1, "revoked-issuer check moved"
+new = s.replace(old, ".is_some_and(|entry| false && entry.status == KeyStatus::Revoked)")'
+
+mutate "a skipped check does not satisfy a requirement" src/verify.rs \
+  security_invariants forging_acceptance_by_leaving_a_required_check_unperformed_is_refused \
+  'old = "        Some(c) if c.status == CheckStatus::Pass => None,"
+assert s.count(old) == 1, "check_reason pass arm moved"
+new = s.replace(old, "        Some(c) if c.status != CheckStatus::Fail => None,")'
+
+mutate "a bundle's signature binds every field" src/trust.rs \
+  security_invariants forging_any_signed_field_of_a_bundle_is_refused \
+  'old = "let intact = verifying_key.verify(&bytes, &signature).is_ok();"
+assert s.count(old) == 1, "bundle signature check moved"
+new = s.replace(old, "let intact = verifying_key.verify(&bytes, &signature).is_ok() || true;")'
+
+mutate "a stranger's first bundle needs a pin" src/trust.rs \
+  security_invariants forging_trust_with_a_well_formed_bundle_from_an_unpinned_authority_is_refused \
+  'old = "        None if expected_issuer.is_none() => {"
+assert s.count(old) == 1, "unpinned-issuer arm moved"
+new = s.replace(old, "        None if false => {")'
+
+mutate "a required revision with no evidence is a failure" src/crypto/supply_chain.rs \
+  image_verify_cli a_required_revision_with_no_evidence_fails \
+  'old = """                Ok(None) => CheckResult::fail(
+                    "revision","""
+assert s.count(old) == 1, "revision no-evidence arm moved"
+new = s.replace(old, """                Ok(None) => CheckResult::skipped(
+                    "revision",""")'
+
+mutate "process isolation does not claim a network control" src/sandbox/mod.rs \
+  security_invariants forging_isolation_by_claiming_a_network_control_process_isolation_lacks_is_refused \
+  'old = """                            "network",
+                            NotEnforced,
+                            format!(
+                                "process isolation has no network control"""
+assert s.count(old) == 1, "process-mode network row moved"
+new = s.replace(old, """                            "network",
+                            Enforced,
+                            format!(
+                                "process isolation has no network control""")'
+
+mutate "signing authority is loaded after the steps" src/executor/mod.rs \
+  security_invariants forging_a_signature_with_authority_available_during_the_build_is_refused \
+  'old = """        let start_time = Instant::now();
+        let mut provenance = crate::provenance::collect("""
+assert s.count(old) == 1, "start of Executor::run moved"
+new = s.replace(old, """        let start_time = Instant::now();
+        self.load_signing_key()?;
+        let mut provenance = crate::provenance::collect(""")'
+
+mutate "declared inputs are unwritable while the step runs" src/executor/mod.rs \
+  security_invariants forging_a_declared_input_from_inside_the_step_is_refused \
+  'old = "let guard = InputGuard::hold(&workspace, &step.inputs)?;"
+assert s.count(old) == 1, "input guard moved"
+new = s.replace(old, "let guard = InputGuard::hold(&workspace, &[])?;")'
+
+mutate "a symlink's target must be declared" src/hashing.rs \
+  security_invariants forging_an_input_through_a_symlink_to_an_undeclared_file_is_refused \
+  'old = "        if !covered {"
+assert s.count(old) == 1, "symlink coverage check moved"
+new = s.replace(old, "        if false {")'
+
+mutate "trust freshness follows the signer" src/verify.rs \
+  security_invariants forging_trust_freshness_with_another_issuers_bundle_is_refused \
+  'old = "        .filter(|b| b.keys.iter().any(|k| k.id == signer_id))"
+assert s.count(old) == 1, "per-signer bundle filter moved"
+new = s.replace(old, "        .filter(|b| b.keys.iter().any(|k| k.id == signer_id || true))")'
+
+mutate "a hermetic sandbox clears the ambient environment" src/sandbox/mod.rs \
+  security_invariants forging_a_hermetic_environment_by_inheriting_the_ambient_one_is_refused \
+  'old = """        if !self.config.inherit_environment {
+            // Hermetic: nothing ambient reaches the step. PATH is kept only"""
+assert s.count(old) == 1, "unix-path env_clear moved"
+new = s.replace(old, """        if false {
+            // Hermetic: nothing ambient reaches the step. PATH is kept only""")'
+
+mutate "sign holds the receipt to the verifier's checks" src/core.rs \
+  sign_cli sign_refuses_a_receipt_the_verifier_would_refuse \
+  'old = "    if !failed.is_empty() {\n        eprintln!(\n            \"error: refusing to sign {}: {}\","
+assert s.count(old) == 1, "sign scrutiny moved"
+new = s.replace(old, "    if false {\n        eprintln!(\n            \"error: refusing to sign {}: {}\",")'
+
+mutate "tar extension records are refused on the wire" src/archive.rs \
+  archive_limits gnu_long_link_records_are_refused_on_the_wire \
+  'old = "        .raw(true);"
+assert s.count(old) == 1, "raw archive iteration moved"
+new = s.replace(old, "        .raw(false);")'
+
+mutate "capsule snapshots have no writable workspace alias" src/executor/mod.rs \
+  inputs_stable capsule_refuses_a_snapshot_directory_inside_the_workspace \
+  'old = "        if root.starts_with(workspace.canonicalize()?) {"
+assert s.count(old) == 1, "snapshot scope check moved"
+new = s.replace(old, "        if false {")'
+
+mutate "a capsule mounts the top-level directory of a nested input" src/capsule.rs \
+  inputs_stable a_capsule_mounts_the_top_level_directory_of_a_nested_input \
+  'old = "            input.components().next().and_then(|c| match c {"
+assert s.count(old) == 1, "top-level mount derivation moved"
+new = s.replace(old, "            input.components().last().and_then(|c| match c {")'
+
+mutate "the guard restores only the object it held" src/executor/mod.rs \
+  security_invariants forging_a_permission_change_on_a_foreign_file_through_the_guard_is_refused \
+  'start = s.index("                let Ok(file) = open_input(&path) else {", s.index("impl Drop for InputGuard"))
+end = s.index("                let _ = restore_input_permissions(&file, &path, mode);", start)
+end += len("                let _ = restore_input_permissions(&file, &path, mode);")
+new = s[:start] + "                let _ = std::fs::set_permissions(&path, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(mode));" + s[end:]'
+
+mutate "restoring permissions cannot follow a path swapped after the identity check" src/executor/mod.rs \
+  lib restoring_permissions_after_a_path_swap_does_not_follow_the_link \
+  'old = "    file.set_permissions(std::fs::Permissions::from_mode(mode))"
+assert s.count(old) == 1, "descriptor restore moved"
+new = s.replace(old, "    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))")'
+
+mutate "capsule workspace-root inputs are refused" src/capsule.rs \
+  security_invariants forging_frozen_inputs_with_a_workspace_root_declaration_is_refused \
+  'old = "        if !named {"
+assert s.count(old) == 1, "workspace-root validation moved"
+new = s.replace(old, "        if false {")'
+
+mutate "a revocation only moves earlier" src/trust.rs \
+  security_invariants forging_acceptance_with_a_revocation_dated_too_late_is_refused \
+  'old = ".is_some_and(|at| entry.revoked_at.is_some_and(|known| at < known)) =>"
+assert s.count(old) == 1, "earlier-revocation arm moved"
+new = s.replace(old, ".is_some_and(|_| false) =>")'
+
+mutate "an undated local revocation cannot acquire a date" src/trust.rs \
+  security_invariants forging_acceptance_by_dating_an_unconditional_revocation_is_refused \
+  'old = ".is_some_and(|at| entry.revoked_at.is_some_and(|known| at < known)) =>"
+assert s.count(old) == 1, "undated-revocation check moved"
+new = s.replace(old, ".is_some_and(|at| entry.revoked_at.is_none_or(|known| at < known)) =>")'
 
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \

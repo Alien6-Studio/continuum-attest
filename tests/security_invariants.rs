@@ -19,6 +19,8 @@
 
 use std::path::PathBuf;
 
+use predicates::prelude::*;
+
 use attest::hashing::{hash_outputs, output_manifest};
 
 // ---------------------------------------------------------------------------
@@ -142,6 +144,11 @@ fn workspace(pipeline: &str) -> tempfile::TempDir {
 /// used to have the *rewritten* bytes recorded as its input hash. The
 /// artifact came from "before", the receipt attested "after", and
 /// verification passed on a pair that never existed together.
+///
+/// The inputs are now held unwritable while the step runs, so a plain
+/// write fails at the write. This step puts the write bit back first, as
+/// any process running as the same user can: what the permission bits
+/// cannot prevent, the re-hash after the step has to catch.
 #[test]
 fn forging_provenance_by_mutating_an_input_mid_step_is_refused() {
     let dir = workspace(
@@ -149,7 +156,7 @@ fn forging_provenance_by_mutating_an_input_mid_step_is_refused() {
          name: mutation\n\
          steps:\n  \
            build:\n    \
-             run: \"cp in.txt out.txt && echo after > in.txt\"\n    \
+             run: \"cp in.txt out.txt && chmod u+w in.txt && echo after > in.txt\"\n    \
              inputs: [\"in.txt\"]\n    \
              outputs: [\"out.txt\"]\n",
     );
@@ -698,6 +705,7 @@ fn the_signature_covers_the_causal_root_and_the_events() {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
     let signed = receipt_signing_bytes(&base).expect("canonical bytes");
 
@@ -1132,6 +1140,1147 @@ fn forging_trust_by_dropping_a_public_key_into_the_trust_store_is_refused() {
         ])
         .assert()
         .code(0);
+}
+
+/// A bundle is how a revocation travels. Whoever carries it could edit the
+/// revoked key back to trusted on the way, and a recipient reading the
+/// file would see a well-formed bundle naming a well-formed issuer. The
+/// signature is the only thing that ties the contents to the issuer, so a
+/// bundle whose contents no longer match it must be refused outright, not
+/// reported with a caveat.
+#[test]
+fn forging_trust_by_editing_a_revocation_out_of_a_bundle_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(dir.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let stolen = generate("stolen");
+    attest()
+        .current_dir(dir.path())
+        .args(["keys", "revoke", &stolen])
+        .assert()
+        .success();
+    let bundle = dir.path().join("bundle.json");
+    attest()
+        .current_dir(dir.path())
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            bundle.to_str().unwrap(),
+            "--key",
+            &issuer,
+        ])
+        .assert()
+        .success();
+
+    // The attack: un-revoke the stolen key in transit. Drop the date too,
+    // so the edited entry looks exactly like a trusted one.
+    let text = std::fs::read_to_string(&bundle).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let keys = parsed["keys"].as_array_mut().unwrap();
+    let entry = keys.iter_mut().find(|k| k["id"] == stolen).unwrap();
+    entry["status"] = serde_json::Value::String("trusted".into());
+    entry.as_object_mut().unwrap().remove("revoked_at");
+    std::fs::write(&bundle, serde_json::to_string_pretty(&parsed).unwrap()).unwrap();
+
+    attest()
+        .current_dir(dir.path())
+        .args(["trust", "show", bundle.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("altered after signing"));
+}
+
+/// A verifier that accepts any bundle it is handed accepts an old one.
+/// Whoever cannot forge a bundle can still keep a revocation from arriving
+/// by handing over a copy from before it was issued; and a verifier that
+/// has already accepted the newer bundle must not be talked back into the
+/// older one. The signed sequence is the only thing that orders them, so
+/// a bundle behind the accepted one is refused, not merged.
+#[test]
+fn forging_freshness_by_replaying_an_older_bundle_is_refused() {
+    let producer = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(producer.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let worker = generate("worker");
+    let bundle = |file: &str| {
+        let path = producer.path().join(file);
+        attest()
+            .current_dir(producer.path())
+            .args([
+                "trust",
+                "bundle",
+                "--output",
+                path.to_str().unwrap(),
+                "--key",
+                &issuer,
+            ])
+            .assert()
+            .success();
+        path
+    };
+    let before = bundle("before.json");
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &worker])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let after = bundle("after.json");
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args([
+            "trust",
+            "import",
+            after.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .assert()
+        .success();
+
+    // The replay: the bundle from before the revocation, well formed and
+    // signed by the pinned issuer.
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", before.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("cannot go backwards"));
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// Revoking an authority is what a recipient does when its key may be in
+/// someone else's hands. Whoever holds that key can still produce a
+/// bundle that is well formed, newer than anything accepted, signed by an
+/// issuer the recipient once pinned, and listing a key of their own as
+/// trusted. The local revocation is the only thing that stops it, so an
+/// update from a revoked authority is refused before its contents are
+/// looked at.
+#[test]
+fn forging_a_trust_update_with_a_revoked_authority_is_refused() {
+    let producer = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(producer.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |dir: &std::path::Path, name: &str| {
+        let out = attest()
+            .current_dir(dir)
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let bundle = |dir: &std::path::Path, file: &str, key: &str, extra: &[&str]| {
+        let path = dir.join(file);
+        let mut args = vec![
+            "trust",
+            "bundle",
+            "--output",
+            path.to_str().unwrap(),
+            "--key",
+            key,
+        ];
+        args.extend_from_slice(extra);
+        attest().current_dir(dir).args(&args).assert().success();
+        path
+    };
+    let old = generate(producer.path(), "release");
+    let new = generate(producer.path(), "release-next");
+    let first = bundle(producer.path(), "b1.json", &old, &["--successor", &new]);
+
+    // The theft: a copy of the producer's store, private key included,
+    // taken before the revocation.
+    let thief = tempfile::tempdir().unwrap();
+    copy_tree(
+        &producer.path().join(".attest"),
+        &thief.path().join(".attest"),
+    );
+
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &old])
+        .assert()
+        .success();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = bundle(producer.path(), "b2.json", &new, &[]);
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", first.to_str().unwrap(), "--issuer", &old])
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", second.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // The forgery: the stolen, now revoked, authority vouches for a key
+    // of the thief's own, in a bundle newer than anything accepted.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let planted = generate(thief.path(), "planted");
+    let forged = bundle(thief.path(), "b3.json", &old, &[]);
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", forged.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("revoked authority cannot update"));
+    attest()
+        .current_dir(recipient.path())
+        .args(["keys", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&planted).not());
+}
+
+/// A verdict that counted a skipped check as satisfied would let a caller
+/// require recomputation, get a receipt that was never recomputed, and
+/// read "pass". The skip is honest on its own; it is the requirement that
+/// turns it into a refusal, and that is the protection: a check that did
+/// not run established nothing, whatever the reason it did not run.
+#[test]
+fn forging_acceptance_by_leaving_a_required_check_unperformed_is_refused() {
+    let dir = workspace(ONE_STEP);
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+    let receipt = run_and_receipt(dir.path());
+
+    // Required and performed: accepted. Required and not performed: the
+    // same receipt, the same bytes, refused.
+    attest()
+        .current_dir(dir.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--check-signatures",
+            "false",
+            "--recompute",
+            "--require",
+            "recompute",
+        ])
+        .assert()
+        .code(0);
+    attest()
+        .current_dir(dir.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--check-signatures",
+            "false",
+            "--require",
+            "recompute",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requirement 'recompute' not met"));
+}
+
+/// The signature has to bind every field, not only the one a reviewer
+/// would think to check. Each edit below is a different way of lying
+/// about trust: a later expiry, a bumped sequence, another issuer's name,
+/// a key swapped under a trusted entry, a revocation moved forward, an
+/// extra key, a missing one. Every one must come back as altered, from
+/// `show` and from `import`, and an import that refuses writes nothing.
+#[test]
+fn forging_any_signed_field_of_a_bundle_is_refused() {
+    let producer = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(producer.path())
+        .arg("init")
+        .assert()
+        .success();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let revoked = generate("retired");
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &revoked])
+        .assert()
+        .success();
+    let genuine = producer.path().join("bundle.json");
+    attest()
+        .current_dir(producer.path())
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            genuine.to_str().unwrap(),
+            "--key",
+            &issuer,
+        ])
+        .assert()
+        .success();
+    let original: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&genuine).unwrap()).unwrap();
+
+    // An attacker key, well formed, that the forgeries try to slip in.
+    let intruder = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(intruder.path())
+        .arg("init")
+        .assert()
+        .success();
+    let planted = {
+        let out = attest()
+            .current_dir(intruder.path())
+            .args(["keys", "generate", "--name", "planted"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let planted_bundle = intruder.path().join("theirs.json");
+    attest()
+        .current_dir(intruder.path())
+        .args([
+            "trust",
+            "bundle",
+            "--output",
+            planted_bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let theirs: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&planted_bundle).unwrap()).unwrap();
+    let planted_key = theirs["keys"][0].clone();
+    assert_eq!(planted_key["id"], planted);
+
+    let forgeries: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+        (
+            "valid_until extended",
+            Box::new(|b| {
+                b["valid_until"] = serde_json::json!("2099-01-01T00:00:00Z");
+            }),
+        ),
+        (
+            "issued_at moved",
+            Box::new(|b| {
+                b["issued_at"] = serde_json::json!("2020-01-01T00:00:00Z");
+            }),
+        ),
+        (
+            "sequence bumped",
+            Box::new(|b| {
+                b["sequence"] = serde_json::json!(b["sequence"].as_u64().unwrap() + 1_000_000);
+            }),
+        ),
+        (
+            "issuer renamed to the planted key",
+            Box::new(|b| {
+                b["issuer"] = serde_json::json!({
+                    "key_id": planted_key["id"],
+                    "public_key": planted_key["public_key"],
+                });
+            }),
+        ),
+        (
+            "a trusted entry's key swapped",
+            Box::new(|b| {
+                let keys = b["keys"].as_array_mut().unwrap();
+                let entry = keys.iter_mut().find(|k| k["name"] == "release").unwrap();
+                entry["public_key"] = planted_key["public_key"].clone();
+                entry["id"] = planted_key["id"].clone();
+            }),
+        ),
+        (
+            "a revocation moved later",
+            Box::new(|b| {
+                let keys = b["keys"].as_array_mut().unwrap();
+                let entry = keys.iter_mut().find(|k| k["name"] == "retired").unwrap();
+                entry["revoked_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+            }),
+        ),
+        (
+            "a key added",
+            Box::new(|b| {
+                b["keys"].as_array_mut().unwrap().push(planted_key.clone());
+            }),
+        ),
+        (
+            "the revoked key removed",
+            Box::new(|b| {
+                b["keys"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|k| k["name"] != "retired");
+            }),
+        ),
+        (
+            "a key renamed",
+            Box::new(|b| {
+                let keys = b["keys"].as_array_mut().unwrap();
+                keys[0]["name"] = serde_json::json!("renamed");
+            }),
+        ),
+    ];
+
+    for (what, forge) in forgeries {
+        let mut forged = original.clone();
+        forge(&mut forged);
+        assert_ne!(forged, original, "{what}: the forgery changed nothing");
+        let path = producer.path().join("forged.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&forged).unwrap()).unwrap();
+
+        attest()
+            .current_dir(producer.path())
+            .args(["trust", "show", path.to_str().unwrap()])
+            .assert()
+            .code(1)
+            .stdout(predicates::str::contains("altered after signing").or(
+                // Renaming the issuer also breaks the issuer check; the
+                // signature still fails, which is what this test holds.
+                predicates::str::contains("signature  fail"),
+            ));
+
+        // Each import runs in a fresh process against a fresh store: the
+        // refusal has to hold with no memory of the genuine bundle.
+        let recipient = tempfile::tempdir().unwrap();
+        attest()
+            .current_dir(recipient.path())
+            .arg("init")
+            .assert()
+            .success();
+        attest()
+            .current_dir(recipient.path())
+            .args([
+                "trust",
+                "import",
+                path.to_str().unwrap(),
+                "--issuer",
+                &issuer,
+            ])
+            .assert()
+            .code(1);
+        let trust = recipient.path().join(".attest/trust");
+        assert!(
+            !trust.join("bundles").exists(),
+            "{what}: a refused bundle was recorded as accepted"
+        );
+        assert!(
+            !trust.join(format!("{planted}.pub")).exists()
+                && !trust.join(format!("{issuer}.pub")).exists(),
+            "{what}: a refused bundle left keys behind"
+        );
+    }
+}
+
+/// A bundle can be perfectly formed, current, self-consistent and signed
+/// by a key that vouches for itself, and still come from nobody the
+/// recipient ever agreed to trust. The recipient's pin, not the file, is
+/// what makes an issuer; without one, a stranger's first bundle is
+/// refused whatever it contains, and the store is left untouched.
+#[test]
+fn forging_trust_with_a_well_formed_bundle_from_an_unpinned_authority_is_refused() {
+    let stranger = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(stranger.path())
+        .arg("init")
+        .assert()
+        .success();
+    let out = attest()
+        .current_dir(stranger.path())
+        .args(["keys", "generate", "--name", "stranger"])
+        .output()
+        .unwrap();
+    let their_key = String::from_utf8(out.stdout).unwrap().trim().to_string();
+    let bundle = stranger.path().join("theirs.json");
+    attest()
+        .current_dir(stranger.path())
+        .args(["trust", "bundle", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    // Well formed by the verifier's own account.
+    attest()
+        .current_dir(stranger.path())
+        .args(["trust", "show", bundle.to_str().unwrap()])
+        .assert()
+        .code(0);
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", bundle.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("name the issuer you expect"));
+    let trust = recipient.path().join(".attest/trust");
+    assert!(!trust.join(format!("{their_key}.pub")).exists());
+    assert!(!trust.join("bundles").exists());
+    attest()
+        .current_dir(recipient.path())
+        .args(["keys", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&their_key).not());
+}
+
+/// Process isolation has no network control, and a receipt that said it
+/// did would be the forgery: a recipient reading "network: enforced"
+/// would believe a build could not have fetched anything, when it could.
+/// So the step reaches a listener on this machine, under --verify, and
+/// the receipt is held to saying that it could.
+#[test]
+fn forging_isolation_by_claiming_a_network_control_process_isolation_lacks_is_refused() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = std::thread::spawn(move || listener.accept().is_ok());
+
+    let pipeline = format!(
+        "version: \"0.1\"\n\
+         name: reach\n\
+         steps:\n  \
+           reach:\n    \
+             run: \"python3 -c 'import socket; socket.create_connection((\\\"127.0.0.1\\\", {port}), timeout=10).close()'\"\n    \
+             inputs: []\n    \
+             outputs: []\n    \
+             cache: false\n"
+    );
+    let dir = workspace(&pipeline);
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--verify"])
+        .assert()
+        .success();
+    assert!(
+        accepted.join().unwrap(),
+        "the step reached the network under --verify; if it had not, the claim below would be wrong the other way"
+    );
+
+    let receipt = run_receipt_yaml(dir.path());
+    let network = receipt["isolation"]["controls"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "network")
+        .expect("a network row");
+    assert_eq!(
+        network["status"], "not-enforced",
+        "the receipt must not claim a control that was not in force"
+    );
+}
+
+fn run_receipt_yaml(dir: &std::path::Path) -> serde_yaml::Value {
+    let path = std::fs::read_dir(dir.join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .expect("a receipt was written");
+    serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// Signing authority used to be loaded before the first step ran, so every
+/// step ran in a process that held the key. A step cannot be shown to have
+/// read memory it should not; what can be shown is the moment the key is
+/// loaded. Here a step removes the key from the workspace while it runs.
+/// If the authority is loaded only after the steps, signing has nothing
+/// to load and the run fails with no receipt; if it had been loaded
+/// before, the receipt would come out signed as if nothing had happened.
+#[test]
+fn forging_a_signature_with_authority_available_during_the_build_is_refused() {
+    let dir = workspace(ONE_STEP);
+    let key = {
+        let out = attest()
+            .current_dir(dir.path())
+            .args(["keys", "generate", "--name", "release"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        "version: \"0.1\"\n\
+         name: thief\n\
+         steps:\n  \
+           take:\n    \
+             run: \"rm -f .attest/keys/*.key\"\n    \
+             inputs: []\n    \
+             outputs: []\n    \
+             cache: false\n",
+    )
+    .unwrap();
+
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--sign", "--key", &key])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no private key"));
+    let written = std::fs::read_dir(dir.path().join(".attest/receipts"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "yaml"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        written, 0,
+        "no receipt may be signed by an authority the build had"
+    );
+}
+
+/// Rewriting a declared input used to be caught only afterwards, by the
+/// re-hash, as a run that refused to write a receipt. The step itself had
+/// already consumed and overwritten the bytes. Now the write is refused
+/// at the write: the step fails, the input is intact, and the receipt of
+/// the failed step is written. A guard that stopped guarding would let
+/// the write through, and the run would fail the other way, later, with
+/// the input already changed.
+#[cfg(unix)]
+#[test]
+fn forging_a_declared_input_from_inside_the_step_is_refused() {
+    let dir = workspace(ONE_STEP);
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        "version: \"0.1\"\n\
+         name: rewrite\n\
+         steps:\n  \
+           build:\n    \
+             run: \"cp in.txt out.txt && echo forged > in.txt\"\n    \
+             inputs: [\"in.txt\"]\n    \
+             outputs: [\"out.txt\"]\n    \
+             cache: false\n",
+    )
+    .unwrap();
+
+    attest()
+        .current_dir(dir.path())
+        .arg("run")
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("step 'build' failed"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("in.txt")).unwrap(),
+        "source\n",
+        "the write must be refused, not merely noticed"
+    );
+}
+
+/// A link declared as an input was attested as a link: its target's path,
+/// never its target's bytes. A step reading through it consumed bytes the
+/// manifest did not cover, so changing the target changed nothing a
+/// verifier could see. A link whose target is not itself declared is now
+/// refused, and this holds the refusal.
+#[cfg(unix)]
+#[test]
+fn forging_an_input_through_a_symlink_to_an_undeclared_file_is_refused() {
+    let dir = workspace(
+        "version: \"0.1\"\n\
+         name: link\n\
+         steps:\n  \
+           build:\n    \
+             run: \"cat link > out.txt\"\n    \
+             inputs: [\"link\"]\n    \
+             outputs: [\"out.txt\"]\n",
+    );
+    std::fs::write(dir.path().join("target.txt"), "v1\n").unwrap();
+    std::os::unix::fs::symlink("target.txt", dir.path().join("link")).unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("run")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not under any declared path"));
+    assert!(
+        !dir.path().join("out.txt").exists(),
+        "the step must not have run"
+    );
+}
+
+/// Freshness is a statement about the bundle that vouches for the signer.
+/// With the newest bundle taken across issuers, an attacker who can get
+/// any current bundle accepted, their own, say, would make a signer's
+/// expired trust material read as current. The verdict is held to the
+/// signer's own issuer.
+#[test]
+fn forging_trust_freshness_with_another_issuers_bundle_is_refused() {
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let generate = |dir: &std::path::Path, name: &str| {
+        let out = attest()
+            .current_dir(dir)
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let bundle = |dir: &std::path::Path, file: &str| {
+        let path = dir.join(file);
+        attest()
+            .current_dir(dir)
+            .args(["trust", "bundle", "--output", path.to_str().unwrap()])
+            .assert()
+            .success();
+        path
+    };
+    let signer = generate(producer.path(), "signer");
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &signer])
+        .assert()
+        .success();
+    let receipt = run_receipt_path(producer.path());
+    let theirs = bundle(producer.path(), "signer.json");
+
+    let other = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(other.path())
+        .arg("init")
+        .assert()
+        .success();
+    let unrelated = generate(other.path(), "unrelated");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let newer = bundle(other.path(), "unrelated.json");
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    let trust = recipient.path().join(".attest/trust");
+    for (path, issuer) in [(&theirs, &signer), (&newer, &unrelated)] {
+        attest()
+            .current_dir(recipient.path())
+            .args([
+                "trust",
+                "import",
+                path.to_str().unwrap(),
+                "--issuer",
+                issuer,
+            ])
+            .assert()
+            .success();
+    }
+    let accepted = trust.join("bundles").join(format!("{signer}.json"));
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&accepted).unwrap()).unwrap();
+    stored["valid_until"] = serde_json::Value::String("2020-01-01T00:00:00Z".into());
+    std::fs::write(&accepted, serde_json::to_string(&stored).unwrap()).unwrap();
+
+    attest()
+        .current_dir(producer.path())
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--require",
+            "signature,trust",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("requirement 'trust' not met"));
+}
+
+fn run_receipt_path(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(dir.join(".attest/receipts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "yaml"))
+        .expect("a receipt was written")
+}
+
+/// A hermetic run promised that nothing ambient reached the step, and
+/// the receipt said environment: enforced. Under --verify the sandbox
+/// added the normalized variables on top of the inherited ones, so the
+/// promise held only without --verify. The step probes for a marker the
+/// runner sets; the receipt of a hermetic run must not contain it.
+#[test]
+fn forging_a_hermetic_environment_by_inheriting_the_ambient_one_is_refused() {
+    let dir = workspace(
+        "version: \"0.1\"\n\
+         name: env\n\
+         steps:\n  \
+           probe:\n    \
+             run: \"printenv AMBIENT_MARKER || echo absent\"\n    \
+             inputs: []\n    \
+             outputs: []\n    \
+             cache: false\n",
+    );
+    attest()
+        .current_dir(dir.path())
+        .env("AMBIENT_MARKER", "leaked")
+        .args(["run", "--verify", "--check-reproducibility"])
+        .assert()
+        .success();
+    let receipt: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(run_receipt_path(dir.path())).unwrap())
+            .unwrap();
+    let stdout = receipt["steps"][0]["stdout"].as_str().unwrap().to_string();
+    assert!(
+        !stdout.contains("leaked"),
+        "the ambient marker reached a hermetic step: {stdout}"
+    );
+}
+
+/// The input guard drops write bits before a step and puts them back
+/// after. A step that replaced a guarded path with a symbolic link to a
+/// file of its choosing would have the restore chmod that file instead,
+/// through the link, even when the run is then refused: a private key
+/// going from 0600 to 0644 because attest cleaned up. The restore now
+/// touches only the object whose bits it dropped, found by inode.
+#[cfg(unix)]
+#[test]
+fn forging_a_permission_change_on_a_foreign_file_through_the_guard_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = workspace(ONE_STEP);
+    let vault = tempfile::tempdir().unwrap();
+    let secret = vault.path().join("id_ed25519");
+    std::fs::write(&secret, "private\n").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        format!(
+            "version: \"0.1\"\n\
+             name: swap\n\
+             steps:\n  \
+               build:\n    \
+                 run: \"cp in.txt out.txt && rm -f in.txt && ln -s {} in.txt\"\n    \
+                 inputs: [\"in.txt\"]\n    \
+                 outputs: [\"out.txt\"]\n    \
+                 cache: false\n",
+            secret.display()
+        ),
+    )
+    .unwrap();
+
+    // The run is refused one way or another: the input is not what was
+    // hashed. What this holds is what happened to the file behind the
+    // link while the guard cleaned up.
+    attest()
+        .current_dir(dir.path())
+        .arg("run")
+        .assert()
+        .failure();
+    let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the guard changed a file it never held");
+}
+
+/// A revocation can only move earlier. An issuer who learns the key was
+/// compromised before the date first recorded moves the date back, and
+/// the signatures between the two dates fall with it; a recipient that
+/// kept the first date would go on accepting them.
+#[test]
+fn forging_acceptance_with_a_revocation_dated_too_late_is_refused() {
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let stolen = generate("builder");
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &stolen])
+        .assert()
+        .success();
+    let receipt = run_receipt_path(producer.path());
+    let signed_at: chrono::DateTime<chrono::Utc> = {
+        let text = std::fs::read_to_string(&receipt).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        yaml["timestamp"].as_str().unwrap().parse().unwrap()
+    };
+
+    // First the key is revoked, but dated a day after the signature: the
+    // signature predates it and is accepted on the receipt's own word.
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &stolen])
+        .assert()
+        .success();
+    let policy_path = producer.path().join(".attest/trust/trust.toml");
+    let set_revoked_at = |at: chrono::DateTime<chrono::Utc>| {
+        let text = std::fs::read_to_string(&policy_path).unwrap();
+        let dated: Vec<String> = text
+            .lines()
+            .map(|l| {
+                if l.starts_with("revoked_at = ") {
+                    format!("revoked_at = \"{}\"", at.to_rfc3339())
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        std::fs::write(&policy_path, dated.join("\n") + "\n").unwrap();
+    };
+    set_revoked_at(signed_at + chrono::Duration::days(1));
+    let bundle = |file: &str| {
+        let path = producer.path().join(file);
+        attest()
+            .current_dir(producer.path())
+            .args([
+                "trust",
+                "bundle",
+                "--output",
+                path.to_str().unwrap(),
+                "--key",
+                &issuer,
+            ])
+            .assert()
+            .success();
+        path
+    };
+    let first = bundle("first.json");
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    let trust = recipient.path().join(".attest/trust");
+    attest()
+        .current_dir(recipient.path())
+        .args([
+            "trust",
+            "import",
+            first.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .assert()
+        .success();
+    let verify = |expected: i32| {
+        attest()
+            .current_dir(producer.path())
+            .args([
+                "verify",
+                receipt.to_str().unwrap(),
+                "--trust-store",
+                trust.to_str().unwrap(),
+                "--trust-receipt-timestamp",
+            ])
+            .assert()
+            .code(expected);
+    };
+    verify(0);
+
+    // The correction: the key was already compromised the day before the
+    // signature. A newer bundle carries the earlier date.
+    set_revoked_at(signed_at - chrono::Duration::days(1));
+    let second = bundle("second.json");
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", second.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("earlier"));
+    verify(1);
+}
+
+/// A local revocation without a date rejects every signature. An issuer
+/// cannot reopen a signing window by supplying a date in a later bundle.
+#[test]
+fn forging_acceptance_by_dating_an_unconditional_revocation_is_refused() {
+    use attest::keys::{KeyStore, TrustPolicy};
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let store = KeyStore::new(producer.path());
+    let issuer = store.generate("authority").unwrap();
+    let signer = store.generate("builder").unwrap();
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &signer])
+        .assert()
+        .success();
+    let receipt = run_receipt_path(producer.path());
+    let bundle_path = producer.path().join("bundle.json");
+    let export = || {
+        let bundle = attest::trust::produce(
+            producer.path(),
+            Some(&issuer),
+            chrono::Duration::days(30),
+            None,
+        )
+        .unwrap();
+        attest::trust::write(&bundle, &bundle_path).unwrap();
+    };
+    export();
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .args([
+            "trust",
+            "import",
+            bundle_path.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .assert()
+        .success();
+    let local = KeyStore::new(recipient.path());
+    local.revoke(&signer).unwrap();
+    let mut policy = TrustPolicy::load(&local.trust_dir()).unwrap();
+    policy
+        .keys
+        .iter_mut()
+        .find(|k| k.id == signer)
+        .unwrap()
+        .revoked_at = None;
+    policy.save(&local.trust_dir()).unwrap();
+    let verify = || {
+        attest()
+            .current_dir(recipient.path())
+            .args([
+                "verify",
+                receipt.to_str().unwrap(),
+                "--trust-receipt-timestamp",
+                "--require",
+                "signature,trust",
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicates::str::contains("after its revocation"));
+    };
+    verify();
+
+    store.revoke(&signer).unwrap();
+    export();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "refresh", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(TrustPolicy::load(&local.trust_dir())
+        .unwrap()
+        .entry(&signer)
+        .unwrap()
+        .revoked_at
+        .is_none());
+    verify();
+}
+
+/// A workspace-root declaration used to disappear from the capsule mounts,
+/// so the step read the writable host files while claiming frozen inputs.
+#[cfg(unix)]
+#[test]
+fn forging_frozen_inputs_with_a_workspace_root_declaration_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    for input in [".", "./", "././", ""] {
+        let pipeline = format!(
+            "version: \"1.0\"\nname: root-input\nsteps:\n  read:\n    run: \"cat in.txt\"\n    inputs: [{}]\n    outputs: []\n    capsule: frozen\n    cache: false\n",
+            serde_json::to_string(input).unwrap()
+        );
+        let dir = workspace(&pipeline);
+        std::fs::write(dir.path().join("in.txt"), "original\n").unwrap();
+        attest::capsule::init(
+            dir.path(),
+            "frozen",
+            &format!("busybox@sha256:{}", "0".repeat(64)),
+        )
+        .unwrap();
+        let runtime_dir = tempfile::tempdir().unwrap();
+        let marker = runtime_dir.path().join("producer-ran");
+        let runtime = runtime_dir.path().join("docker");
+        std::fs::write(
+            &runtime,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        attest()
+            .current_dir(dir.path())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    runtime_dir.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .arg("run")
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("workspace root"));
+        assert!(
+            !marker.exists(),
+            "a refused input must never reach the runtime"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(".attest/receipts"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("in.txt")).unwrap(),
+            "original\n"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

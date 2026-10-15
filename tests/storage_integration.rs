@@ -54,6 +54,7 @@ fn create_sample_receipt(pipeline_hash: &str, step_count: usize) -> Receipt {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     }
 }
 

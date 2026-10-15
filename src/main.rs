@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "attest")]
 #[command(about = "Verifiable CI/CD with cryptographic attestation")]
-#[command(version = "0.1.0")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -27,7 +27,11 @@ enum Commands {
         #[arg(short, long, value_name = "FILE", help = "Pipeline file path")]
         pipeline: Option<String>,
 
-        #[arg(long, help = "Run in isolated environment")]
+        #[arg(
+            long,
+            help = "Run steps under process isolation: resource limits and timeouts are enforced; \
+                    network and filesystem access are not. The receipt lists each control and its state"
+        )]
         verify: bool,
 
         #[arg(long, help = "Cryptographically sign results")]
@@ -101,10 +105,53 @@ enum Commands {
         command: Vec<String>,
     },
 
+    /// Sign a receipt produced elsewhere, in a process that ran no project command
+    Sign {
+        #[arg(value_name = "RECEIPT", help = "Unsigned receipt file")]
+        receipt: String,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Signing key id (see 'attest keys list'); the only private key if omitted"
+        )]
+        key: Option<String>,
+
+        #[arg(long, help = "Request an RFC 3161 timestamp over the signature")]
+        timestamp: bool,
+
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Timestamp authority to use with --timestamp"
+        )]
+        tsa: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Write the signed receipt here instead of in place"
+        )]
+        output: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Workspace holding .attest/ (default: current directory)"
+        )]
+        workspace: Option<String>,
+    },
+
     /// Key management and trust store
     Keys {
         #[command(subcommand)]
         action: KeysCommands,
+    },
+
+    /// Trust bundles: hand your trust store to someone else, intact
+    Trust {
+        #[command(subcommand)]
+        action: TrustCommands,
     },
 
     /// Compute a canonical attest-manifest/v1 hash for declared paths
@@ -202,6 +249,41 @@ enum Commands {
 
         #[arg(
             long,
+            value_name = "PROPERTY",
+            help = "Refuse unless this property is established: signature, timestamp, recompute, linkage, trust, success (comma-separated, repeatable)"
+        )]
+        require: Vec<String>,
+
+        #[arg(
+            long,
+            value_name = "BYTES",
+            help = "Refuse an archive larger than this on disk (default 64 MiB)"
+        )]
+        max_archive_bytes: Option<u64>,
+
+        #[arg(
+            long,
+            value_name = "BYTES",
+            help = "Refuse an archive that expands past this (default 512 MiB)"
+        )]
+        max_unpacked_bytes: Option<u64>,
+
+        #[arg(
+            long,
+            value_name = "N",
+            help = "Refuse an archive with more entries than this (default 10000)"
+        )]
+        max_entries: Option<usize>,
+
+        #[arg(
+            long,
+            value_name = "BYTES",
+            help = "Refuse an archive entry larger than this (default 64 MiB)"
+        )]
+        max_entry_bytes: Option<u64>,
+
+        #[arg(
+            long,
             default_value = "text",
             help = "Output format: text or json (NDJSON)"
         )]
@@ -268,6 +350,13 @@ enum Commands {
             help = "Accept a revoked key on the statement's own finishedOn, with no independent proof of when it was signed"
         )]
         trust_statement_time: bool,
+
+        #[arg(
+            long,
+            value_name = "PROPERTY",
+            help = "Refuse unless this property is established: signature (comma-separated, repeatable)"
+        )]
+        require: Vec<String>,
 
         #[arg(
             long,
@@ -408,6 +497,74 @@ enum KeysCommands {
 }
 
 #[derive(Subcommand)]
+enum TrustCommands {
+    /// Assemble and sign a bundle of the keys this store trusts and has revoked
+    Bundle {
+        #[arg(short, long, value_name = "FILE", help = "Where to write the bundle")]
+        output: String,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Issuer key (see 'attest keys list'); the only private key if omitted"
+        )]
+        key: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DAYS",
+            default_value = "90",
+            help = "How long the bundle stays valid"
+        )]
+        valid_for: u32,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Hand over to this trusted key: recipients accept its first bundle on the strength of this one"
+        )]
+        successor: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Workspace holding .attest/ (default: current directory)"
+        )]
+        workspace: Option<String>,
+    },
+
+    /// Import a bundle into the trust store, or refresh from a newer one; never online
+    #[command(visible_alias = "refresh")]
+    Import {
+        #[arg(value_name = "BUNDLE", help = "Bundle file")]
+        bundle: String,
+
+        #[arg(
+            long,
+            value_name = "KEY_ID",
+            help = "Issuer key id you expect, obtained through another channel; required the first time"
+        )]
+        issuer: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Workspace holding .attest/ (default: current directory)"
+        )]
+        workspace: Option<String>,
+    },
+
+    /// Read a bundle and say who issued it, until when, and whether it is intact
+    Show {
+        #[arg(value_name = "BUNDLE", help = "Bundle file")]
+        bundle: String,
+
+        #[arg(long, default_value = "text", help = "Output format: text or json")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ImageCommands {
     /// Sign a container image with cosign (digest references only)
     Sign {
@@ -475,9 +632,6 @@ enum ImageCommands {
         )]
         image: String,
 
-        #[arg(long, help = "Show detailed verification information")]
-        detailed: bool,
-
         #[arg(long, help = "Enforce a structurally valid SPDX SBOM attestation")]
         require_sbom: bool,
 
@@ -499,6 +653,20 @@ enum ImageCommands {
                     or a public-key file; enables the signature check"
         )]
         key: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "IDENTITY",
+            help = "Keyless: the certificate identity the signature must carry (with --certificate-oidc-issuer)"
+        )]
+        certificate_identity: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "ISSUER",
+            help = "Keyless: the OIDC issuer the identity must come from (with --certificate-identity)"
+        )]
+        certificate_oidc_issuer: Option<String>,
 
         #[arg(
             long,
@@ -652,18 +820,105 @@ async fn main() -> Result<()> {
             workspace,
             command,
         } => {
+            // Before anything runs, once, for every way a run can happen:
+            // a wrapped command, a pipeline, or a pipeline replayed for
+            // reproducibility all pass through here.
+            refuse_unmet(&[
+                Prerequisite {
+                    option: "--timestamp",
+                    given: timestamp,
+                    requires: "--sign",
+                    met: sign,
+                    why: "there is no signature to timestamp",
+                },
+                Prerequisite {
+                    option: "--key",
+                    given: key.is_some(),
+                    requires: "--sign",
+                    met: sign,
+                    why: "a key was named but nothing would be signed",
+                },
+                Prerequisite {
+                    option: "--tsa",
+                    given: tsa.is_some(),
+                    requires: "--timestamp",
+                    met: timestamp,
+                    why: "an authority was named but no timestamp was requested",
+                },
+                Prerequisite {
+                    option: "--wrap",
+                    given: wrap,
+                    requires: "--name <STEP_NAME>",
+                    met: name.is_some(),
+                    why: "the receipt records the wrapped command under a step name",
+                },
+                Prerequisite {
+                    option: "--wrap",
+                    given: wrap,
+                    requires: "a command after `--`",
+                    met: !command.is_empty(),
+                    why: "there is nothing to wrap otherwise",
+                },
+                Prerequisite {
+                    option: "--name",
+                    given: name.is_some(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run takes step names from the pipeline file",
+                },
+                Prerequisite {
+                    option: "--input",
+                    given: !inputs.is_empty(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run declares inputs in the pipeline file",
+                },
+                Prerequisite {
+                    option: "--output",
+                    given: !outputs.is_empty(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run declares outputs in the pipeline file",
+                },
+                Prerequisite {
+                    option: "--workspace",
+                    given: workspace.is_some(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run uses the current directory",
+                },
+                Prerequisite {
+                    option: "a command after `--`",
+                    given: !command.is_empty(),
+                    requires: "--wrap",
+                    met: wrap,
+                    why: "a pipeline run takes its commands from the pipeline file",
+                },
+                Prerequisite {
+                    option: "--check-reproducibility",
+                    given: check_reproducibility,
+                    requires: "a pipeline run, not --wrap",
+                    met: !wrap,
+                    why: "a wrapped command runs once; there is nothing to replay",
+                },
+                Prerequisite {
+                    option: "--pipeline",
+                    given: pipeline.is_some(),
+                    requires: "a pipeline run, not --wrap",
+                    met: !wrap,
+                    why: "--wrap takes a command, not a pipeline file",
+                },
+                Prerequisite {
+                    option: "--verify",
+                    given: verify,
+                    requires: "a pipeline run, not --wrap",
+                    met: !wrap,
+                    why: "--wrap runs without a sandbox",
+                },
+            ]);
             if wrap {
-                let name = match name {
-                    Some(name) => name,
-                    None => {
-                        eprintln!("error: --wrap requires --name <STEP_NAME>");
-                        std::process::exit(2);
-                    }
-                };
-                if command.is_empty() {
-                    eprintln!("error: --wrap requires a command after `--`");
-                    std::process::exit(2);
-                }
+                // Both guaranteed by the rules above.
+                let name = name.unwrap_or_default();
                 let workspace = workspace
                     .map(std::path::PathBuf::from)
                     .map_or_else(std::env::current_dir, Ok)
@@ -671,10 +926,6 @@ async fn main() -> Result<()> {
                         eprintln!("error: cannot determine working directory: {e}");
                         std::process::exit(2);
                     });
-                if tsa.is_some() && !timestamp {
-                    eprintln!("error: --tsa requires --timestamp");
-                    std::process::exit(2);
-                }
                 let options = attest::wrap::WrapOptions {
                     name,
                     inputs: inputs.iter().map(std::path::PathBuf::from).collect(),
@@ -696,10 +947,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            if name.is_some() || !inputs.is_empty() || !outputs.is_empty() || !command.is_empty() {
-                eprintln!("error: --name/--input/--output/`-- <COMMAND>` require --wrap");
-                std::process::exit(2);
-            }
             let config = attest::executor::ExecutorConfig {
                 isolated: verify,
                 sign_results: sign,
@@ -710,13 +957,6 @@ async fn main() -> Result<()> {
                 sandbox_config: None,
                 hermetic_env: false,
             };
-            // `--tsa` without `--timestamp` is a mistake worth naming: the
-            // user asked for an authority and would otherwise silently get
-            // no timestamp at all.
-            if tsa.is_some() && !timestamp {
-                eprintln!("error: --tsa requires --timestamp");
-                std::process::exit(2);
-            }
             let tsa_url = timestamp.then(|| {
                 tsa.clone()
                     .unwrap_or_else(|| attest::crypto::timestamp::DEFAULT_TSA_URL.to_string())
@@ -759,8 +999,26 @@ async fn main() -> Result<()> {
             workspace,
             trust_store,
             offline,
+            require,
+            max_archive_bytes,
+            max_unpacked_bytes,
+            max_entries,
+            max_entry_bytes,
             format,
         } => {
+            let mut limits = attest::archive::ArchiveLimits::default();
+            if let Some(v) = max_archive_bytes {
+                limits.compressed = v;
+            }
+            if let Some(v) = max_unpacked_bytes {
+                limits.decompressed = v;
+            }
+            if let Some(v) = max_entries {
+                limits.entries = v;
+            }
+            if let Some(v) = max_entry_bytes {
+                limits.entry = v;
+            }
             let code = handle_verify(
                 receipts,
                 archive,
@@ -770,10 +1028,55 @@ async fn main() -> Result<()> {
                 workspace,
                 trust_store,
                 offline,
+                require,
+                limits,
                 format,
             );
             std::process::exit(code);
         }
+
+        Commands::Sign {
+            receipt,
+            key,
+            timestamp,
+            tsa,
+            output,
+            workspace,
+        } => {
+            refuse_unmet(&[Prerequisite {
+                option: "--tsa",
+                given: tsa.is_some(),
+                requires: "--timestamp",
+                met: timestamp,
+                why: "an authority was named but no timestamp was requested",
+            }]);
+            let workspace = workspace
+                .map(std::path::PathBuf::from)
+                .map_or_else(std::env::current_dir, Ok)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot determine working directory: {e}");
+                    std::process::exit(2);
+                });
+            let tsa_url = timestamp.then(|| {
+                tsa.clone()
+                    .unwrap_or_else(|| attest::crypto::timestamp::DEFAULT_TSA_URL.to_string())
+            });
+            match attest::core::sign_receipt_file(
+                &workspace,
+                std::path::Path::new(&receipt),
+                key.as_deref(),
+                tsa_url.as_deref(),
+                output.as_deref().map(std::path::Path::new),
+            ) {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    std::process::exit(2);
+                }
+            }
+        }
+
+        Commands::Trust { action } => std::process::exit(handle_trust(action)),
 
         Commands::Keys { action } => {
             let code = handle_keys(action);
@@ -911,6 +1214,7 @@ async fn main() -> Result<()> {
             workspace,
             trust_store,
             trust_statement_time,
+            require,
             report,
         } => {
             let code = handle_import(
@@ -919,24 +1223,15 @@ async fn main() -> Result<()> {
                 workspace,
                 trust_store,
                 trust_statement_time,
+                require,
                 report,
             );
             std::process::exit(code);
         }
 
-        Commands::Image { action } => match action {
-            ImageCommands::Sign {
-                image_ref,
-                key,
-                annotations,
-                allow_file_key,
-                no_require_clean_tree,
-                clean_paths,
-                receipt_dir,
-                sign,
-                receipt_key,
-            } => {
-                let code = handle_image_sign(
+        Commands::Image { action } => {
+            match action {
+                ImageCommands::Sign {
                     image_ref,
                     key,
                     annotations,
@@ -946,29 +1241,87 @@ async fn main() -> Result<()> {
                     receipt_dir,
                     sign,
                     receipt_key,
-                );
-                std::process::exit(code);
-            }
-            ImageCommands::Verify {
-                image,
-                detailed,
-                require_sbom,
-                require_provenance,
-                expected_revision,
-                key,
-                format,
-                receipt,
-                receipt_dir,
-                sign_receipt,
-                receipt_key,
-            } => {
-                let receipt_requested = receipt || receipt_dir.is_some() || sign_receipt;
-                let supply_chain_requested = require_sbom
-                    || require_provenance
-                    || expected_revision.is_some()
-                    || key.is_some()
-                    || receipt_requested;
-                if supply_chain_requested {
+                } => {
+                    refuse_unmet(&[Prerequisite {
+                        option: "--receipt-key",
+                        given: receipt_key.is_some(),
+                        requires: "--sign",
+                        met: sign,
+                        why: "a key was named but the signing receipt would not be signed",
+                    }]);
+                    let code = handle_image_sign(
+                        image_ref,
+                        key,
+                        annotations,
+                        allow_file_key,
+                        no_require_clean_tree,
+                        clean_paths,
+                        receipt_dir,
+                        sign,
+                        receipt_key,
+                    );
+                    std::process::exit(code);
+                }
+                ImageCommands::Verify {
+                    image,
+                    require_sbom,
+                    require_provenance,
+                    expected_revision,
+                    key,
+                    certificate_identity,
+                    certificate_oidc_issuer,
+                    format,
+                    receipt,
+                    receipt_dir,
+                    sign_receipt,
+                    receipt_key,
+                } => {
+                    let signature_requested = key.is_some()
+                        || (certificate_identity.is_some() && certificate_oidc_issuer.is_some());
+                    let anything_requested = require_sbom
+                        || require_provenance
+                        || expected_revision.is_some()
+                        || signature_requested;
+                    refuse_unmet(&[
+                    Prerequisite {
+                        option: "--receipt-key",
+                        given: receipt_key.is_some(),
+                        requires: "--sign-receipt",
+                        met: sign_receipt,
+                        why: "a key was named but the verification receipt would not be signed",
+                    },
+                    Prerequisite {
+                        option: "--certificate-identity",
+                        given: certificate_identity.is_some(),
+                        requires: "--certificate-oidc-issuer",
+                        met: certificate_oidc_issuer.is_some(),
+                        why: "an identity is only meaningful from a named issuer",
+                    },
+                    Prerequisite {
+                        option: "--certificate-oidc-issuer",
+                        given: certificate_oidc_issuer.is_some(),
+                        requires: "--certificate-identity",
+                        met: certificate_identity.is_some(),
+                        why: "an issuer alone would accept any identity it issued",
+                    },
+                    Prerequisite {
+                        option: "--key",
+                        given: key.is_some(),
+                        requires: "no --certificate-identity",
+                        met: certificate_identity.is_none(),
+                        why: "a signature is verified against a key or against an identity, not both",
+                    },
+                    Prerequisite {
+                        option: "image verify",
+                        given: true,
+                        requires: "at least one property to establish",
+                        met: anything_requested,
+                        why: "pass --key or --certificate-identity with --certificate-oidc-issuer, \
+                              --require-sbom, --require-provenance or --expected-revision; a \
+                              verification that checks nothing does not pass, it does not run",
+                    },
+                ]);
+                    let receipt_requested = receipt || receipt_dir.is_some() || sign_receipt;
                     let receipt_options = if receipt_requested {
                         Some(attest::crypto::supply_chain::VerifyReceiptOptions {
                             receipt_dir: receipt_dir.map(std::path::PathBuf::from),
@@ -978,23 +1331,23 @@ async fn main() -> Result<()> {
                     } else {
                         None
                     };
-                    let code = handle_image_supply_chain(
-                        image,
+                    let request = attest::crypto::supply_chain::SupplyChainRequest {
+                        image_ref: image,
                         require_sbom,
                         require_provenance,
                         expected_revision,
-                        key,
-                        format,
-                        receipt_options,
-                    );
+                        key_uri: key,
+                        certificate_identity,
+                        certificate_oidc_issuer,
+                    };
+                    let code = handle_image_supply_chain(request, format, receipt_options);
                     std::process::exit(code);
                 }
-                handle_image_verify(image, detailed).await
+                ImageCommands::Config { show, test_cosign } => {
+                    handle_image_config(show, test_cosign).await
+                }
             }
-            ImageCommands::Config { show, test_cosign } => {
-                handle_image_config(show, test_cosign).await
-            }
-        },
+        }
 
         Commands::Causal { action } => match action {
             CausalCommands::Path {
@@ -1146,6 +1499,194 @@ fn handle_keys(action: KeysCommands) -> i32 {
     }
 }
 
+fn handle_trust(action: TrustCommands) -> i32 {
+    match action {
+        TrustCommands::Bundle {
+            output,
+            key,
+            valid_for,
+            successor,
+            workspace,
+        } => {
+            let workspace = workspace
+                .map(std::path::PathBuf::from)
+                .map_or_else(std::env::current_dir, Ok)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot determine working directory: {e}");
+                    std::process::exit(2);
+                });
+            let validity = chrono::Duration::days(i64::from(valid_for));
+            match attest::trust::produce(&workspace, key.as_deref(), validity, successor.as_deref())
+                .and_then(|bundle| {
+                    attest::trust::write(&bundle, std::path::Path::new(&output))?;
+                    Ok(bundle)
+                }) {
+                Ok(bundle) => {
+                    eprintln!(
+                        "bundle issued by {} with {} keys, valid until {}",
+                        bundle.issuer.key_id,
+                        bundle.keys.len(),
+                        bundle.valid_until
+                    );
+                    println!("{output}");
+                    0
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    2
+                }
+            }
+        }
+
+        TrustCommands::Import {
+            bundle,
+            issuer,
+            workspace,
+        } => {
+            let workspace = workspace
+                .map(std::path::PathBuf::from)
+                .map_or_else(std::env::current_dir, Ok)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: cannot determine working directory: {e}");
+                    std::process::exit(2);
+                });
+            match attest::trust::import(
+                &workspace,
+                std::path::Path::new(&bundle),
+                issuer.as_deref(),
+                chrono::Utc::now(),
+            ) {
+                Ok(report) => {
+                    if report.already_current {
+                        println!(
+                            "already current: bundle {} from {} was accepted before",
+                            report.sequence, report.issuer
+                        );
+                        return 0;
+                    }
+                    if let Some((predecessor, sequence)) = &report.handover_from {
+                        println!(
+                            "handover: {predecessor} named {} as its successor in bundle {sequence}; \
+                             accepting this first bundle from {} on that basis",
+                            report.issuer, report.issuer
+                        );
+                    }
+                    for (id, name, status) in &report.added {
+                        println!("added    {id}  {name:<20} {status}");
+                    }
+                    for (id, name, at) in &report.revoked {
+                        println!("revoked  {id}  {name:<20} at {at}");
+                    }
+                    for (id, name, at) in &report.revocation_moved_earlier {
+                        println!("revoked  {id}  {name:<20} earlier, at {at}");
+                    }
+                    for (id, name) in &report.kept_revoked {
+                        println!(
+                            "kept     {id}  {name:<20} revoked here; the bundle lists it as trusted, \
+                             a bundle does not un-revoke"
+                        );
+                    }
+                    println!(
+                        "accepted bundle {} from {}: {} added, {} revoked, {} unchanged; valid until {}",
+                        report.sequence,
+                        report.issuer,
+                        report.added.len(),
+                        report.revoked.len(),
+                        report.unchanged,
+                        report
+                            .valid_until
+                            .map(|t| t.to_string())
+                            .unwrap_or_default()
+                    );
+                    0
+                }
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    1
+                }
+            }
+        }
+
+        TrustCommands::Show { bundle, format } => {
+            if format != "text" && format != "json" {
+                eprintln!("error: --format must be text or json");
+                return 2;
+            }
+            let path = std::path::Path::new(&bundle);
+            let parsed = match attest::trust::read(path) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("error: {err:#}");
+                    return 2;
+                }
+            };
+            let report = attest::trust::report(path, &parsed, chrono::Utc::now());
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("report serializes")
+                );
+            } else {
+                println!("{}: {}", report.bundle, report.verdict);
+                println!("  issuer       {}", report.issuer.key_id);
+                println!("  issued       {}", report.issued_at);
+                println!("  valid until  {}", report.valid_until);
+                println!("  sequence     {}", report.sequence);
+                if let Some(successor) = &report.successor {
+                    println!("  successor    {}", successor.key_id);
+                }
+                println!("  keys");
+                for key in &report.keys {
+                    let revoked = key
+                        .revoked_at
+                        .map(|at| format!(" at {at}"))
+                        .unwrap_or_default();
+                    println!("    {}  {:<20} {}{}", key.id, key.name, key.status, revoked);
+                }
+                println!("  checks");
+                for check in &report.checks {
+                    let status = if check.passed { "pass" } else { "fail" };
+                    println!("    {:<10} {:<5} {}", check.name, status, check.detail);
+                }
+            }
+            if report.verdict == "pass" {
+                0
+            } else {
+                1
+            }
+        }
+    }
+}
+
+/// An option whose effect depends on another option. Every such pairing is
+/// declared here and checked before a single project command runs: an
+/// option that could not take effect is a usage error at the prompt, not
+/// something discovered after the build has had its side effects, and never
+/// something silently dropped. A new security-sensitive option states its
+/// prerequisite in one of these tables rather than in the code that would
+/// eventually fail to honour it.
+struct Prerequisite {
+    option: &'static str,
+    given: bool,
+    requires: &'static str,
+    met: bool,
+    why: &'static str,
+}
+
+/// Exit 2 on the first unmet prerequisite: an operational error, not a
+/// verification result, because nothing has run yet.
+fn refuse_unmet(rules: &[Prerequisite]) {
+    for rule in rules {
+        if rule.given && !rule.met {
+            eprintln!(
+                "error: {} requires {}; {}",
+                rule.option, rule.requires, rule.why
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Handle receipt verification.
 ///
 /// Exit codes: 0 = every receipt passes, 1 = at least one verification
@@ -1160,10 +1701,19 @@ fn handle_verify(
     workspace: Option<String>,
     trust_store: Option<String>,
     _offline: bool, // all checks are local today; reserved for future remote lookups
+    require: Vec<String>,
+    limits: attest::archive::ArchiveLimits,
     format: String,
 ) -> i32 {
-    use attest::verify::{verify_receipt_file, VerifyOptions};
+    use attest::verify::{verify_receipt_file, Policy, VerifyOptions};
 
+    let policy = match Policy::parse(&require) {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("error: --require: {err}");
+            return 2;
+        }
+    };
     if format != "text" && format != "json" {
         eprintln!(
             "error: unsupported --format '{}' (expected text or json)",
@@ -1199,16 +1749,14 @@ fn handle_verify(
         workspace,
         trust_store: trust_store.map(std::path::PathBuf::from),
         trust_receipt_timestamp,
+        policy,
     };
 
     if let Some(archive_path) = archive {
         let path = std::path::Path::new(&archive_path);
-        let verdict = match attest::archive::verify_archive(path, &opts) {
+        let verdict = match attest::archive::verify_archive_bounded(path, &opts, &limits) {
             Ok(verdict) => verdict,
-            Err(err) => {
-                eprintln!("error: {:#}", err);
-                return 2;
-            }
+            Err(err) => return report_operational_error(&archive_path, &err, &format),
         };
 
         for receipt_verdict in &verdict.receipts {
@@ -1235,10 +1783,7 @@ fn handle_verify(
     for receipt_path in &receipts {
         let verdict = match verify_receipt_file(std::path::Path::new(receipt_path), &opts) {
             Ok(verdict) => verdict,
-            Err(err) => {
-                eprintln!("error: {:#}", err);
-                return 2;
-            }
+            Err(err) => return report_operational_error(receipt_path, &err, &format),
         };
 
         print_verdict(&verdict, &format);
@@ -1333,9 +1878,18 @@ fn handle_import(
     workspace: Option<String>,
     trust_store: Option<String>,
     trust_statement_time: bool,
+    require: Vec<String>,
     report: String,
 ) -> i32 {
     use attest::interop::{import_statement_file, ImportOptions};
+
+    let policy = match attest::verify::Policy::parse(&require) {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("error: --require: {err}");
+            return 2;
+        }
+    };
 
     if format != "in-toto" {
         eprintln!(
@@ -1359,6 +1913,7 @@ fn handle_import(
         workspace,
         trust_store: trust_store.map(std::path::PathBuf::from),
         trust_statement_time,
+        policy,
     };
     let verdict = match import_statement_file(std::path::Path::new(&statement), &options) {
         Ok(verdict) => verdict,
@@ -1373,6 +1928,31 @@ fn handle_import(
     } else {
         1
     }
+}
+
+/// An error that stopped verification before any verdict: exit 2, and in
+/// JSON mode one record that says so, with `resource-limit` set apart from
+/// every other operational cause so a consumer never confuses "too big to
+/// look at" with "looked at and wrong".
+fn report_operational_error(subject: &str, err: &anyhow::Error, format: &str) -> i32 {
+    let kind = if attest::archive::resource_limit(err).is_some() {
+        "resource-limit"
+    } else {
+        "operational"
+    };
+    eprintln!("error: {err:#}");
+    if format == "json" {
+        println!(
+            "{}",
+            serde_json::json!({
+                "subject": subject,
+                "verdict": "error",
+                "error": kind,
+                "detail": format!("{err:#}"),
+            })
+        );
+    }
+    2
 }
 
 /// Print one receipt verdict in the requested format (text or NDJSON) and
@@ -1397,6 +1977,53 @@ fn print_verdict(verdict: &attest::verify::ReceiptVerdict, format: &str) {
         }
         if let Some(key) = &verdict.signed_by {
             println!("  signed by: {}", key);
+        }
+        if let Some(execution) = &verdict.execution {
+            println!(
+                "  execution: {}{}",
+                execution.outcome,
+                if execution.failed_steps > 0 {
+                    format!(" ({} failed step(s))", execution.failed_steps)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        if let Some(policy) = &verdict.policy {
+            if !policy.required.is_empty() {
+                let names: Vec<&str> = policy.required.iter().map(|r| r.name()).collect();
+                println!("  required: {}", names.join(", "));
+            }
+            for unmet in &policy.unmet {
+                println!(
+                    "  REFUSED: requirement '{}' not met: {}",
+                    unmet.requirement.name(),
+                    unmet.reason
+                );
+            }
+        }
+        if let Some(material) = &verdict.trust_material {
+            match (material.state.as_str(), &material.issuer) {
+                ("none", _) | (_, None) => println!(
+                    "  trust material: no bundle on record; revocations are as current as this \
+                     store's last manual change"
+                ),
+                (state, Some(issuer)) => println!(
+                    "  trust material: bundle {} from {} {} {} ({})",
+                    material.sequence.unwrap_or_default(),
+                    issuer,
+                    if state == "expired" {
+                        "expired at"
+                    } else {
+                        "valid until"
+                    },
+                    material
+                        .valid_until
+                        .map(|t| t.to_string())
+                        .unwrap_or_default(),
+                    material.judged_by
+                ),
+            }
         }
     }
 
@@ -1511,17 +2138,11 @@ fn handle_image_sign(
 /// signature with the Azure KMS export workaround (IMG-9/10). Exit
 /// codes per IMG-12: 0 pass, 1 enforced check failed, 2 operational.
 fn handle_image_supply_chain(
-    image: String,
-    require_sbom: bool,
-    require_provenance: bool,
-    expected_revision: Option<String>,
-    key: Option<String>,
+    request: attest::crypto::supply_chain::SupplyChainRequest,
     format: String,
     receipt_options: Option<attest::crypto::supply_chain::VerifyReceiptOptions>,
 ) -> i32 {
-    use attest::crypto::supply_chain::{
-        write_verification_receipt, SupplyChainRequest, SupplyChainVerifier,
-    };
+    use attest::crypto::supply_chain::{write_verification_receipt, SupplyChainVerifier};
 
     if format != "text" && format != "json" {
         eprintln!(
@@ -1531,15 +2152,7 @@ fn handle_image_supply_chain(
         return 2;
     }
 
-    let request = SupplyChainRequest {
-        image_ref: image,
-        require_sbom,
-        require_provenance,
-        expected_revision,
-        key_uri: key,
-    };
-
-    let verifier = match SupplyChainVerifier::locate(request.key_uri.is_some()) {
+    let verifier = match SupplyChainVerifier::locate(request.signature_requested()) {
         Ok(verifier) => verifier,
         Err(failure) => {
             eprintln!("error: {}", failure.message());
@@ -1566,6 +2179,15 @@ fn handle_image_supply_chain(
                         attest::crypto::supply_chain::CheckStatus::Skipped => "skipped",
                     };
                     println!("  {:<10} {:<7} {}", check.name, status, check.detail);
+                }
+                let names: Vec<&str> = report.policy.required.iter().map(|r| r.name()).collect();
+                println!("required: {}", names.join(", "));
+                for unmet in &report.policy.unmet {
+                    println!(
+                        "REFUSED: requirement '{}' not met: {}",
+                        unmet.requirement.name(),
+                        unmet.reason
+                    );
                 }
                 println!("verdict: {}", report.verdict);
             }
@@ -1598,56 +2220,6 @@ fn handle_image_supply_chain(
     }
 }
 
-async fn handle_image_verify(image: String, detailed: bool) -> Result<()> {
-    use attest::crypto::image_verification::{
-        EnforcementLevel, ImageVerificationConfig, ImageVerifier,
-    };
-
-    println!("Verifying container image: {}", image);
-
-    // Create verification configuration (warn to demo without cosign)
-    let config = ImageVerificationConfig {
-        enforcement_level: EnforcementLevel::Warn,
-        ..Default::default()
-    };
-
-    // Create verifier and verify image
-    let verifier = ImageVerifier::new(config)?;
-    let result = verifier.verify_image_signature(&image).await?;
-
-    // Display results
-    if result.is_valid {
-        println!("Image signature verification PASSED");
-        println!("Image: {}", image);
-        println!("Digest: {}", result.image_digest);
-
-        if let Some(sig_info) = &result.signature_info {
-            println!("Signer: {}", sig_info.signer);
-            if let Some(issuer) = &sig_info.oidc_issuer {
-                println!("OIDC Issuer: {}", issuer);
-            }
-        }
-    } else {
-        println!("Image signature verification FAILED");
-        println!("Image: {}", image);
-        for message in &result.messages {
-            println!("warning:  {}", message);
-        }
-    }
-
-    if detailed {
-        println!("\nDetailed Verification Information:");
-        println!(
-            "   Verified at: {}",
-            result.verified_at.format("%Y-%m-%d %H:%M:%S UTC")
-        );
-        println!("Messages: {:#?}", result.messages);
-    }
-
-    Ok(())
-}
-
-/// Handle image configuration command
 async fn handle_image_config(show: bool, test_cosign: bool) -> Result<()> {
     use attest::crypto::image_verification::{ImageVerificationConfig, ImageVerifier};
 
@@ -1660,11 +2232,9 @@ async fn handle_image_config(show: bool, test_cosign: bool) -> Result<()> {
             config.verify_transparency_log
         );
         println!("Enforcement level: {:?}", config.enforcement_level);
-        println!("Trusted keys: {} configured", config.trusted_keys.len());
-        println!(
-            "   Trusted OIDC issuers: {} configured",
-            config.trusted_oidc_issuers.len()
-        );
+        // Not printed: the trusted key and issuer lists. This shows the
+        // default configuration, where both are empty, and a line about
+        // trusted keys next to a key count reads as more than it is.
     }
 
     if test_cosign {

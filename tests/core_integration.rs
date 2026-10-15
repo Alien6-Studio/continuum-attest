@@ -133,6 +133,7 @@ async fn test_verification_workflow() -> Result<()> {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     // No signature present: current implementation returns Ok(false) (nothing

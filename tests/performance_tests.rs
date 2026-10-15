@@ -346,6 +346,7 @@ fn create_test_receipt(name: &str, step_count: usize) -> Receipt {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     }
 }
 

@@ -71,7 +71,8 @@ pub struct CapsuleManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapsuleMounts {
     /// Container path the workspace is bind-mounted at, read-write.
-    /// Exactly one workspace mount exists in v1.
+    /// Exactly one workspace mount exists in v1. A step's declared inputs
+    /// are mounted read-only over it at their own paths.
     pub workspace: PathBuf,
 }
 
@@ -204,10 +205,40 @@ pub fn runtime_binary() -> Option<&'static str> {
     }
 }
 
+/// A workspace-root input cannot be overlaid on the writable workspace
+/// mount. Reject it instead of silently running without its snapshot.
+pub(crate) fn validate_input_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let mut named = false;
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(_) => named = true,
+                std::path::Component::CurDir => {}
+                _ => anyhow::bail!(
+                    "capsule input {} must be a relative path without '..'",
+                    path.display()
+                ),
+            }
+        }
+        if !named {
+            anyhow::bail!(
+                "capsule input '{}' names the workspace root; declare paths below it instead of '.' or an empty path",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build the full `docker`/`podman` argument vector for a capsule run.
 /// Split out of [`run`] so tests can assert the exact isolation flags
 /// without a container runtime.
-pub fn run_args(manifest: &CapsuleManifest, workspace: &Path, command: &[String]) -> Vec<String> {
+pub fn run_args(
+    manifest: &CapsuleManifest,
+    workspace: &Path,
+    inputs: &InputMounts,
+    command: &[String],
+) -> Vec<String> {
     let mount = manifest.mounts.workspace.display().to_string();
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -217,9 +248,40 @@ pub fn run_args(manifest: &CapsuleManifest, workspace: &Path, command: &[String]
         "--read-only".into(),
         "-v".into(),
         format!("{}:{}", workspace.display(), mount),
-        "-w".into(),
-        mount,
     ];
+    // Declared inputs are mounted read-only over the writable workspace
+    // mount, from a snapshot taken when they were hashed, so the step
+    // reads exactly the bytes the receipt describes: the runtime refuses
+    // a write from inside, and a change on the host during the step never
+    // reaches the view. The mount is the input's first path component,
+    // not the input itself: a mount point cannot be renamed or replaced
+    // from inside, while a plain parent directory could be moved aside and
+    // a substitute put in its place. What a step sees under that top-level
+    // directory is the snapshot, that is, the declared inputs only. Sorted,
+    // so the argument vector is the same for the same declaration.
+    let mut tops: Vec<PathBuf> = inputs
+        .paths
+        .iter()
+        .filter_map(|input| {
+            input.components().next().and_then(|c| match c {
+                std::path::Component::Normal(name) => Some(PathBuf::from(name)),
+                _ => None,
+            })
+        })
+        .collect();
+    tops.sort();
+    tops.dedup();
+    for top in tops {
+        let host = inputs.root.join(&top);
+        if !host.exists() {
+            continue;
+        }
+        let inside = manifest.mounts.workspace.join(&top);
+        args.push("-v".into());
+        args.push(format!("{}:{}:ro", host.display(), inside.display()));
+    }
+    args.push("-w".into());
+    args.push(mount);
     // Environment = exactly the manifest env + the #8 normalization set;
     // normalization wins on conflict, ambient env never appears.
     let mut env = manifest.env.clone();
@@ -243,6 +305,21 @@ pub fn run_args(manifest: &CapsuleManifest, workspace: &Path, command: &[String]
     args
 }
 
+/// Declared inputs to mount read-only into a capsule, and the directory
+/// they are mounted from: the workspace itself, or a snapshot of it taken
+/// when the inputs were hashed.
+#[derive(Debug, Clone, Default)]
+pub struct InputMounts {
+    pub root: PathBuf,
+    pub paths: Vec<PathBuf>,
+}
+
+impl InputMounts {
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
 /// `attest capsule run`: execute `command` inside the capsule. The
 /// manifest is re-validated (digest pinning included). Returns the
 /// command's exit code; stdout/stderr are inherited.
@@ -257,7 +334,12 @@ pub fn run(workspace: &Path, name: &str, command: &[String]) -> Result<i32> {
         .canonicalize()
         .with_context(|| format!("cannot resolve workspace {}", workspace.display()))?;
     let status = Command::new(binary)
-        .args(run_args(&manifest, &workspace, command))
+        .args(run_args(
+            &manifest,
+            &workspace,
+            &InputMounts::none(),
+            command,
+        ))
         .status()
         .with_context(|| format!("failed to execute {binary}"))?;
     Ok(status.code().unwrap_or(1))
@@ -268,15 +350,17 @@ pub fn run(workspace: &Path, name: &str, command: &[String]) -> Result<i32> {
 pub fn run_captured(
     manifest: &CapsuleManifest,
     workspace: &Path,
+    inputs: &InputMounts,
     command: &[String],
 ) -> Result<std::process::Output> {
+    validate_input_paths(&inputs.paths)?;
     let binary = runtime_binary()
         .context("no container runtime found (docker or podman required for capsule steps)")?;
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("cannot resolve workspace {}", workspace.display()))?;
     Command::new(binary)
-        .args(run_args(manifest, &workspace, command))
+        .args(run_args(manifest, &workspace, inputs, command))
         .output()
         .with_context(|| format!("failed to execute {binary}"))
 }
@@ -305,7 +389,12 @@ mod tests {
     #[test]
     fn run_args_enforce_isolation() {
         let manifest = CapsuleManifest::new("demo", DIGEST_REF).expect("manifest");
-        let args = run_args(&manifest, Path::new("/ws"), &["true".to_string()]);
+        let args = run_args(
+            &manifest,
+            Path::new("/ws"),
+            &InputMounts::none(),
+            &["true".to_string()],
+        );
         assert!(args.contains(&"--read-only".to_string()));
         let net = args.iter().position(|a| a == "--network").expect("network");
         assert_eq!(args[net + 1], "none");
@@ -319,7 +408,12 @@ mod tests {
     fn entrypoint_precedes_image_and_command() {
         let mut manifest = CapsuleManifest::new("demo", DIGEST_REF).expect("manifest");
         manifest.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string()]);
-        let args = run_args(&manifest, Path::new("/ws"), &["echo hi".to_string()]);
+        let args = run_args(
+            &manifest,
+            Path::new("/ws"),
+            &InputMounts::none(),
+            &["echo hi".to_string()],
+        );
         let ep = args
             .iter()
             .position(|a| a == "--entrypoint")

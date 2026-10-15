@@ -423,6 +423,11 @@ created: "{}"
 
     /// Install an explicitly selected keypair (see `attest keys`).
     pub fn set_keypair(&mut self, keypair: AttestKeypair) {
+        // The ledger may already be open from recording during the run;
+        // a keypair arriving late must reach it, or events go unsigned.
+        if let Some(ledger) = self.causal_ledger.as_mut() {
+            let _ = ledger.load_keypair(keypair.clone());
+        }
         self.keypair = Some(keypair);
     }
 

@@ -68,6 +68,7 @@ fn a_timestamp_token_defeats_a_backdated_receipt() {
         reproducibility: None,
         provenance: None,
         timestamp_token: None,
+        isolation: None,
     };
 
     // They hold the key, so the backdated receipt is perfectly self
@@ -111,6 +112,7 @@ fn a_timestamp_token_defeats_a_backdated_receipt() {
         workspace: workspace.path().to_path_buf(),
         trust_store: Some(trust_dir.clone()),
         trust_receipt_timestamp: true,
+        policy: Default::default(),
     };
 
     // 1. Without the token the attack works: the receipt's own claim of

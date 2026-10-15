@@ -4,15 +4,16 @@
 # the short name (see [lib] and [[bin]] below), so `use attest::…` and the
 # `attest` command are unchanged.
 name = "continuum-attest"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Alien6 <contact@alien6.com>"]
 description = "Verifiable CI/CD with cryptographic attestation"
 # Minimum supported Rust version, verified in CI against the committed
 # Cargo.lock. Determined by the locked dependency graph, not by this
-# crate's own syntax: `time`, `globset` and the `icu_*` family declare
-# 1.88. Raising it is a deliberate decision, not a side effect of a bump.
-rust-version = "1.88"
+# crate's own syntax: `uuid` 1.27+ declares 1.89, `time`, `globset` and
+# the `icu_*` family 1.88. Raising it is a deliberate decision, not a side
+# effect of a bump: 1.88 -> 1.89 was decided for 0.2 to take uuid 1.28.
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/Alien6-Studio/continuum-attest"
 homepage = "https://attest.continuu.ms"
@@ -38,7 +39,14 @@ unwrap_used = "warn"
 # CLI & configuration
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
+# serde_yaml under its maintained fork. The author deprecated serde_yaml
+# and archived unsafe-libyaml, the C-to-Rust port it parses with
+# (RUSTSEC-2024-0449); serde_norway keeps both going under the same API,
+# so the crate is renamed here and the code keeps saying serde_yaml.
+# Receipt signatures cover the canonical JSON bytes, not the YAML, so the
+# parser can change without a signature changing; the fixtures under
+# tests/fixtures/receipts hold the parser to reading old receipts intact.
+serde_yaml = { package = "serde_norway", version = "0.9.42" }
 serde_json = "1.0"
 
 # Crypto & attestation

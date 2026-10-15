@@ -365,6 +365,8 @@ pub struct ImportOptions {
     /// otherwise launder a revoked signature past the check that `verify`
     /// applies to the receipt itself.
     pub trust_statement_time: bool,
+    /// What the caller requires; the same names as `attest verify`.
+    pub policy: crate::verify::Policy,
 }
 
 fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
@@ -379,11 +381,15 @@ fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
 /// shape as `attest verify`. `Err` is reserved for operational problems
 /// (unreadable file, content that is not JSON at all) and maps to exit
 /// code 2; every verification failure is a failed check (exit code 1).
+/// Largest DSSE envelope this importer will parse; the same reasoning as
+/// [`crate::verify::MAX_RECEIPT_BYTES`].
+pub const MAX_STATEMENT_BYTES: u64 = 16 * 1024 * 1024;
+
 pub fn import_statement_file(path: &Path, options: &ImportOptions) -> Result<ReceiptVerdict> {
     let display_path = path.display().to_string();
-    let content = std::fs::read_to_string(path)
+    let content = crate::verify::read_bounded(path, MAX_STATEMENT_BYTES, "statement")
         .with_context(|| format!("cannot read statement file: {}", display_path))?;
-    let value: serde_json::Value = serde_json::from_str(&content)
+    let value: serde_json::Value = serde_json::from_slice(&content)
         .with_context(|| format!("unreadable JSON in {}", display_path))?;
 
     let mut checks: Vec<Check> = Vec::new();
@@ -422,13 +428,18 @@ pub fn import_statement_file(path: &Path, options: &ImportOptions) -> Result<Rec
         "pass"
     };
 
-    Ok(ReceiptVerdict {
+    let mut verdict = ReceiptVerdict {
         receipt: display_path,
         verdict: verdict.to_string(),
         checks,
         signed_by,
         warnings,
-    })
+        trust_material: None,
+        execution: None,
+        policy: None,
+    };
+    crate::verify::apply_policy(&mut verdict, &options.policy);
+    Ok(verdict)
 }
 
 /// Parse the envelope and its payload; any shape problem is a schema-check
@@ -748,12 +759,13 @@ mod tests {
             total_duration_secs: 30,
             signature: None,
             signer_public_key: None,
-            attest_version: "0.1.0".to_string(),
+            attest_version: env!("CARGO_PKG_VERSION").to_string(),
             causal_events: vec![],
             causal_chain_hash: None,
             reproducibility: None,
             provenance: None,
             timestamp_token: None,
+            isolation: None,
         }
     }
 
@@ -782,7 +794,7 @@ mod tests {
         );
         assert_eq!(
             statement.predicate.run_details.builder.id,
-            "https://alien6.com/attest@v0.1.0"
+            format!("https://alien6.com/attest@v{}", env!("CARGO_PKG_VERSION"))
         );
 
         let first = serde_json::to_string(&statement).expect("json");

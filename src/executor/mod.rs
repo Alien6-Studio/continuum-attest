@@ -58,7 +58,434 @@ pub struct Executor<'a> {
     config: ExecutorConfig,
     sandbox: Option<Sandbox>,
     mode_config: Option<ModeConfig>,
+    /// How to obtain the signing authority, called once every project
+    /// command has finished and not before. Producing evidence and signing
+    /// it are different trust operations: nothing a step runs should share
+    /// the process that holds the key, so the key is not held while steps
+    /// run.
+    key_loader: Option<KeyLoader>,
+    /// How the executed steps' declared inputs were held: how many steps
+    /// ran, how many of those in a capsule (read-only mounts, enforced by
+    /// the runtime), and whether the permission-bit guard could be applied
+    /// at all (not as root, not without permission bits).
+    inputs_held: InputsHeld,
 }
+
+#[derive(Default)]
+struct InputsHeld {
+    executed: usize,
+    in_capsule: usize,
+    guard_applied: bool,
+}
+
+/// A copy of a step's declared inputs, taken at hashing time and hashed
+/// again to prove it is the state the receipt describes. Kept outside
+/// the writable workspace so a step cannot change it through another
+/// mount of the same files; removed when dropped.
+struct InputSnapshot {
+    root: std::path::PathBuf,
+    paths: Vec<std::path::PathBuf>,
+    _directory: tempfile::TempDir,
+}
+
+impl InputSnapshot {
+    fn take(
+        workspace: &std::path::Path,
+        step_name: &str,
+        step: &crate::pipeline::Step,
+        expected_input_hash: &str,
+    ) -> Result<Self> {
+        crate::capsule::validate_input_paths(&step.inputs)?;
+        let directory = tempfile::Builder::new()
+            .prefix("attest-inputs-")
+            .tempdir()?;
+        let root = directory.path().canonicalize()?;
+        if root.starts_with(workspace.canonicalize()?) {
+            anyhow::bail!("capsule snapshots require a temporary directory outside the workspace; set TMPDIR accordingly");
+        }
+        // Copy each tree once. Repeated declarations and a directory
+        // declared alongside one of its children describe the same bytes.
+        let mut paths = Vec::new();
+        for input in &step.inputs {
+            let mut relative = std::path::PathBuf::new();
+            for component in input.components() {
+                match component {
+                    std::path::Component::Normal(part) => relative.push(part),
+                    std::path::Component::CurDir => {}
+                    _ => anyhow::bail!(
+                        "capsule input {} must be a relative path without '..'",
+                        input.display()
+                    ),
+                }
+            }
+            paths.push(relative);
+        }
+        paths.sort();
+        paths.dedup();
+        let mut minimal = Vec::<std::path::PathBuf>::new();
+        for path in paths {
+            if !minimal.iter().any(|parent| path.starts_with(parent)) {
+                minimal.push(path);
+            }
+        }
+        let snapshot = Self {
+            root,
+            paths: minimal,
+            _directory: directory,
+        };
+        for input in &snapshot.paths {
+            let from = workspace.join(input);
+            let to = snapshot.root.join(input);
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            copy_tree(&from, &to)
+                .with_context(|| format!("cannot snapshot input {}", input.display()))?;
+        }
+        let hashed =
+            crate::hashing::hash_inputs(&snapshot.root, step_name, &step.run, &step.inputs)?;
+        if hashed != expected_input_hash {
+            anyhow::bail!(
+                "step '{}': declared inputs changed between hashing and snapshot (hashed {}, \
+                 snapshot {}); the step did not run",
+                step_name,
+                expected_input_hash,
+                hashed
+            );
+        }
+        Ok(snapshot)
+    }
+}
+
+impl Drop for InputSnapshot {
+    fn drop(&mut self) {
+        // InputGuard made the source directories read-only before the
+        // copy. Restore access only on private snapshot directories, never
+        // following a link, so TempDir can remove their contents too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for entry in walkdir::WalkDir::new(&self.root)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+            {
+                if entry.file_type().is_dir() {
+                    if let Ok(meta) = entry.metadata() {
+                        let mode = meta.permissions().mode() | 0o700;
+                        let _ = std::fs::set_permissions(
+                            entry.path(),
+                            std::fs::Permissions::from_mode(mode),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Copy a file, a directory tree or a symbolic link as it is: links stay
+/// links (never followed), modes are kept. Directory entries are copied in
+/// name order, so two snapshots of the same tree are built the same way.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(from)?;
+        if target.is_absolute() {
+            anyhow::bail!(
+                "capsule snapshots require relative symbolic links: {}",
+                from.display()
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, to)?;
+        #[cfg(not(unix))]
+        anyhow::bail!("symbolic links in snapshots need a Unix platform");
+        return Ok(());
+    }
+    if meta.is_dir() {
+        std::fs::create_dir_all(to)?;
+        let mut entries: Vec<_> = std::fs::read_dir(from)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        std::fs::set_permissions(to, meta.permissions())?;
+        return Ok(());
+    }
+    std::fs::copy(from, to)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn step(inputs: &[&str]) -> crate::pipeline::Step {
+        let mut step: crate::pipeline::Step = serde_yaml::from_str("run: cat src/a.txt").unwrap();
+        step.inputs = inputs.iter().map(std::path::PathBuf::from).collect();
+        step
+    }
+
+    fn workspace() -> tempfile::TempDir {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("src")).unwrap();
+        std::fs::write(workspace.path().join("src/a.txt"), "original\n").unwrap();
+        workspace
+    }
+
+    fn hash(workspace: &std::path::Path, step: &crate::pipeline::Step) -> String {
+        crate::hashing::hash_inputs(workspace, "build", &step.run, &step.inputs).unwrap()
+    }
+
+    #[test]
+    fn snapshot_is_outside_the_writable_workspace() {
+        let workspace = workspace();
+        let step = step(&["src"]);
+        let expected = hash(workspace.path(), &step);
+        let guard = InputGuard::hold(workspace.path(), &step.inputs).unwrap();
+        let snapshot = InputSnapshot::take(workspace.path(), "build", &step, &expected).unwrap();
+        let root = snapshot.root.clone();
+        assert!(
+            !root
+                .canonicalize()
+                .unwrap()
+                .starts_with(workspace.path().canonicalize().unwrap()),
+            "a writable workspace alias would bypass the read-only input mount"
+        );
+        drop(snapshot);
+        assert!(
+            !root.exists(),
+            "read-only directories must be cleaned up too"
+        );
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_accepts_overlapping_and_repeated_inputs() {
+        let workspace = workspace();
+        std::os::unix::fs::symlink("src/a.txt", workspace.path().join("link")).unwrap();
+        let step = step(&["src", "src/a.txt", "link", "link", "src"]);
+        let expected = hash(workspace.path(), &step);
+        let snapshot = InputSnapshot::take(workspace.path(), "build", &step, &expected).unwrap();
+        assert_eq!(hash(&snapshot.root, &step), expected);
+        assert_eq!(
+            std::fs::read_to_string(snapshot.root.join("link")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn snapshot_refuses_inputs_changed_since_hashing() {
+        let workspace = workspace();
+        let step = step(&["src"]);
+        let expected = hash(workspace.path(), &step);
+        std::fs::write(workspace.path().join("src/a.txt"), "changed\n").unwrap();
+        let error = InputSnapshot::take(workspace.path(), "build", &step, &expected)
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("changed between hashing and snapshot"));
+    }
+}
+
+/// Declared inputs held unwritable while a step runs, restored afterwards.
+///
+/// Permission bits, not a mount: every regular file and directory under a
+/// declared input loses its write bits before the step starts and gets
+/// them back when the guard drops, on success or failure. A process
+/// running as the same user could put the bits back itself; the re-hash
+/// catches only changes that are still present afterwards. Root is not
+/// bound by permission bits, and the receipt reports this limitation.
+struct InputGuard {
+    /// Path, original mode, and the device and inode the mode belongs to.
+    /// Restoring goes back to that object only: a step could have put a
+    /// symbolic link to some other file at the path, and chmod through
+    /// that link would change a file nobody asked attest to touch.
+    restore: Vec<(std::path::PathBuf, u32, u64, u64)>,
+    enforced: bool,
+}
+
+/// Open without following a final symlink, then use this descriptor for
+/// both identity checks and chmod. Nonblocking avoids hanging if a racing
+/// writer replaces a regular file with a FIFO. Descriptors are closed
+/// after each operation, so a large input tree does not exhaust RLIMIT_NOFILE.
+#[cfg(unix)]
+fn open_input(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn restore_input_permissions(
+    file: &std::fs::File,
+    path: &std::path::Path,
+    mode: u32,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("cannot restore input permissions for {}", path.display()))
+}
+
+impl InputGuard {
+    fn hold(workspace: &std::path::Path, inputs: &[std::path::PathBuf]) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if unsafe { libc::geteuid() } == 0 {
+                return Ok(Self {
+                    restore: Vec::new(),
+                    enforced: false,
+                });
+            }
+            // Construct the guard before the first chmod so a later
+            // failure also restores paths already made read-only.
+            let mut guard = Self {
+                restore: Vec::new(),
+                enforced: true,
+            };
+            for input in inputs {
+                let root = workspace.join(input);
+                let Ok(meta) = std::fs::symlink_metadata(&root) else {
+                    // A missing input is reported by hashing, with the
+                    // right error; nothing to hold here.
+                    continue;
+                };
+                let paths: Vec<std::path::PathBuf> = if meta.is_dir() {
+                    walkdir::WalkDir::new(&root)
+                        .follow_links(false)
+                        .into_iter()
+                        .filter_map(Result::ok)
+                        .filter(|e| !e.file_type().is_symlink())
+                        .map(|e| e.into_path())
+                        .collect()
+                } else if meta.file_type().is_symlink() {
+                    Vec::new()
+                } else {
+                    vec![root]
+                };
+                for path in paths {
+                    use std::os::unix::fs::MetadataExt;
+                    let meta = std::fs::symlink_metadata(&path)?;
+                    let mode = meta.permissions().mode();
+                    if mode & 0o222 == 0 {
+                        continue;
+                    }
+                    let file = open_input(&path)
+                        .with_context(|| format!("cannot open input {}", path.display()))?;
+                    let opened = file.metadata()?;
+                    if opened.dev() != meta.dev() || opened.ino() != meta.ino() {
+                        anyhow::bail!(
+                            "input {} changed while acquiring its permissions",
+                            path.display()
+                        );
+                    }
+                    file.set_permissions(std::fs::Permissions::from_mode(mode & !0o222))
+                        .map_err(|e| {
+                            anyhow::anyhow!("cannot make input {} read-only: {e}", path.display())
+                        })?;
+                    guard.restore.push((path, mode, meta.dev(), meta.ino()));
+                }
+            }
+            Ok(guard)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (workspace, inputs);
+            Ok(Self {
+                restore: Vec::new(),
+                enforced: false,
+            })
+        }
+    }
+
+    fn enforced(&self) -> bool {
+        self.enforced
+    }
+}
+
+impl Drop for InputGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            for (path, mode, dev, ino) in self.restore.drain(..).rev() {
+                // Only the object whose bits were dropped gets them back.
+                // A link now standing at the path, or another file moved
+                // there, is left exactly as the step left it.
+                let Ok(file) = open_input(&path) else {
+                    continue;
+                };
+                let Ok(now) = file.metadata() else {
+                    continue;
+                };
+                if now.dev() != dev || now.ino() != ino {
+                    continue;
+                }
+                let _ = restore_input_permissions(&file, &path, mode);
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod input_guard_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    /// Swap the path after the identity check, at the old chmod race.
+    /// The descriptor still targets the original inode, even after a rename.
+    #[test]
+    fn restoring_permissions_after_a_path_swap_does_not_follow_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let moved = dir.path().join("moved");
+        let secret = dir.path().join("secret");
+        std::fs::write(&input, "input").unwrap();
+        std::fs::write(&secret, "secret").unwrap();
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = open_input(&input).unwrap();
+        assert_eq!(
+            file.metadata().unwrap().ino(),
+            std::fs::metadata(&input).unwrap().ino()
+        );
+
+        std::fs::rename(&input, &moved).unwrap();
+        std::os::unix::fs::symlink(&secret, &input).unwrap();
+        restore_input_permissions(&file, &input, 0o644).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&moved).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn acquiring_permissions_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        let input = dir.path().join("input");
+        std::fs::write(&secret, "secret").unwrap();
+        std::os::unix::fs::symlink(&secret, &input).unwrap();
+        assert!(open_input(&input).is_err());
+    }
+}
+
+/// Loads the keypair that signs the receipt and the ledger events. Invoked
+/// after the last step, so a step cannot observe or influence the
+/// authority; a loader that fails fails the run, with no receipt written.
+pub type KeyLoader = Box<dyn FnOnce() -> Result<crate::crypto::sign::AttestKeypair> + Send + Sync>;
 
 impl<'a> Executor<'a> {
     pub fn new(storage: &'a mut Storage, config: ExecutorConfig) -> Result<Self> {
@@ -72,10 +499,13 @@ impl<'a> Executor<'a> {
     ) -> Result<Self> {
         // Create sandbox if isolation is enabled
         let sandbox = if config.isolated {
-            let sandbox_config = config
+            let mut sandbox_config = config
                 .sandbox_config
                 .clone()
                 .unwrap_or_else(|| Self::create_default_sandbox_config(&config));
+            if config.hermetic_env {
+                sandbox_config.inherit_environment = false;
+            }
             Some(Sandbox::new(sandbox_config)?)
         } else {
             None
@@ -86,7 +516,26 @@ impl<'a> Executor<'a> {
             config,
             sandbox,
             mode_config,
+            key_loader: None,
+            inputs_held: InputsHeld::default(),
         })
+    }
+
+    /// Sign this run's receipt with the authority `loader` produces, loaded
+    /// only once every step has run.
+    pub fn sign_with(&mut self, loader: KeyLoader) {
+        self.key_loader = Some(loader);
+    }
+
+    /// The moment signing authority becomes available: after the steps,
+    /// before the ledger events and the receipt are assembled. Nothing the
+    /// project controls runs past this point.
+    fn load_signing_key(&mut self) -> Result<()> {
+        if let Some(loader) = self.key_loader.take() {
+            let keypair = loader()?;
+            self.storage.set_keypair(keypair);
+        }
+        Ok(())
     }
 
     fn create_default_sandbox_config(config: &ExecutorConfig) -> SandboxConfig {
@@ -111,6 +560,7 @@ impl<'a> Executor<'a> {
             container_config,
             seccomp_profile: Some("minimal".to_string()),
             security_level: crate::sandbox::SecurityLevel::Minimal,
+            inherit_environment: !config.hermetic_env,
         }
     }
 
@@ -219,6 +669,7 @@ impl<'a> Executor<'a> {
                 .capsule
                 .as_deref()
                 .map(|name| {
+                    crate::capsule::validate_input_paths(&step.inputs)?;
                     let workspace = std::env::current_dir()?;
                     crate::capsule::load(&workspace, name)
                 })
@@ -270,11 +721,32 @@ impl<'a> Executor<'a> {
                 (cached_entry.result, true)
             } else {
                 tracing::info!("Cache miss for step: {}, executing...", step_name);
+                // The declared inputs are what the receipt will say the
+                // step read. For as long as the step runs they are not
+                // writable through the filesystem: a step that tries to
+                // rewrite one fails at the write, instead of the receipt
+                // failing afterwards to describe what was built.
+                let guard = InputGuard::hold(&workspace, &step.inputs)?;
+                self.inputs_held.executed += 1;
+                self.inputs_held.guard_applied = (self.inputs_held.executed == 1
+                    || self.inputs_held.guard_applied)
+                    && guard.enforced();
+                if capsule.is_some() {
+                    self.inputs_held.in_capsule += 1;
+                }
                 let execution_result = if let Some(manifest) = &capsule {
-                    Self::execute_step_in_capsule(manifest, step, &workspace)?
+                    Self::execute_step_in_capsule(
+                        manifest,
+                        &step_name,
+                        step,
+                        &workspace,
+                        &input_hash,
+                    )
                 } else {
-                    self.execute_step(&step_name, step, &env).await?
+                    self.execute_step(&step_name, step, &env).await
                 };
+                drop(guard);
+                let execution_result = execution_result?;
 
                 // A step that rewrites its own declared input leaves the
                 // receipt unable to describe the build honestly: the hash
@@ -347,6 +819,10 @@ impl<'a> Executor<'a> {
             completed_steps.insert(step_name);
         }
 
+        // Every project command has completed. Only now does the signing
+        // authority exist in this process.
+        self.load_signing_key()?;
+
         let total_duration = start_time.elapsed();
         let pipeline_hash = self.compute_pipeline_hash(pipeline).await?;
         let timestamp = self.receipt_timestamp();
@@ -358,6 +834,72 @@ impl<'a> Executor<'a> {
             .record_causal_events(pipeline, &step_results, &pipeline_hash)
             .await?;
 
+        // What this run can claim about isolation: derived from the sandbox
+        // that ran the steps, or the absence of one, never from the mode's
+        // name. Capsule steps are listed apart, under their own controls.
+        let mut isolation = match &self.sandbox {
+            Some(sandbox) => sandbox.isolation_report(self.config.hermetic_env),
+            None => crate::sandbox::unisolated_report(self.config.hermetic_env),
+        };
+        isolation.capsule_steps = step_results
+            .iter()
+            .filter(|s| s.capsule_hash.is_some())
+            .map(|s| s.name.clone())
+            .collect();
+        // Declared inputs. A capsule mounts them read-only and the runtime
+        // refuses the write, whatever the step runs as: that is enforced. A
+        // local step gets its inputs' write bits dropped, which refuses a
+        // plain write but not a step that puts the bits back, changes the
+        // file and restores it before it ends; the re-hash afterwards sees
+        // nothing. So the row says not enforced outside a capsule, and says
+        // why, rather than naming a guard as a guarantee.
+        let held = &self.inputs_held;
+        let (status, detail) = if held.executed == 0 {
+            (
+                crate::sandbox::ControlStatus::NotEnforced,
+                "no step executed (every step was a cache hit)".to_string(),
+            )
+        } else if held.in_capsule == held.executed {
+            (
+                crate::sandbox::ControlStatus::Enforced,
+                "every step ran in a capsule with its declared inputs mounted read-only from a \
+                 snapshot taken at hashing time: the runtime refuses writes from inside, and a \
+                 change on the host during the step never reaches the step's view"
+                    .to_string(),
+            )
+        } else if held.guard_applied {
+            (
+                crate::sandbox::ControlStatus::NotEnforced,
+                format!(
+                    "write bits dropped on declared inputs while each step ran, which refuses a \
+                     plain write but not a step that restores the bits, changes a file and puts \
+                     it back before it ends; changes still present after the step are detected \
+                     by re-hashing, changes undone before it ends are not. Only a capsule \
+                     enforces this ({} of {} steps ran in one)",
+                    held.in_capsule, held.executed
+                ),
+            )
+        } else if cfg!(unix) {
+            (
+                crate::sandbox::ControlStatus::NotEnforced,
+                "running as root, permission bits do not bind; changes to declared inputs are \
+                 detected by re-hashing after the step, not prevented"
+                    .to_string(),
+            )
+        } else {
+            (
+                crate::sandbox::ControlStatus::NotAvailable,
+                "no read-only view on this platform; changes to declared inputs are detected by \
+                 re-hashing after the step, not prevented"
+                    .to_string(),
+            )
+        };
+        isolation.controls.push(crate::sandbox::IsolationControl {
+            name: "inputs".to_string(),
+            status,
+            detail,
+        });
+
         let mut receipt = Receipt {
             schema_version: Some(crate::storage::RECEIPT_SCHEMA_VERSION),
             pipeline_hash,
@@ -366,12 +908,13 @@ impl<'a> Executor<'a> {
             total_duration_secs: total_duration.as_secs(),
             signature: None,
             signer_public_key: None,
-            attest_version: "0.1.0".to_string(),
+            attest_version: env!("CARGO_PKG_VERSION").to_string(),
             causal_events,
             causal_chain_hash,
             reproducibility: None,
             provenance: Some(provenance),
             timestamp_token: None,
+            isolation: Some(isolation),
         };
 
         // Sign the receipt based on mode configuration
@@ -492,11 +1035,26 @@ impl<'a> Executor<'a> {
     /// process env is the manifest env + normalization set only.
     fn execute_step_in_capsule(
         manifest: &crate::capsule::CapsuleManifest,
+        step_name: &str,
         step: &crate::pipeline::Step,
         workspace: &std::path::Path,
+        input_hash: &str,
     ) -> Result<crate::sandbox::SandboxResult> {
         let command = vec!["sh".to_string(), "-c".to_string(), step.run.clone()];
-        let output = crate::capsule::run_captured(manifest, workspace, &command)?;
+        // The step reads its declared inputs from a snapshot, not from the
+        // workspace: a copy taken now, hashed, and required to match the
+        // hash the receipt will carry. A process on the host can change the
+        // workspace while the step runs; it cannot change what the step
+        // sees, and if it changes the workspace between the hash and the
+        // copy, the mismatch refuses the step.
+        let snapshot = InputSnapshot::take(workspace, step_name, step, input_hash)?;
+        let mounts = crate::capsule::InputMounts {
+            root: snapshot.root.clone(),
+            paths: snapshot.paths.clone(),
+        };
+        let output = crate::capsule::run_captured(manifest, workspace, &mounts, &command);
+        drop(snapshot);
+        let output = output?;
         Ok(crate::sandbox::SandboxResult {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),

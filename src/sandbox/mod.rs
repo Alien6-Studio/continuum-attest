@@ -17,6 +17,103 @@ pub use deterministic::DeterministicTime;
 pub use enhanced_container::EnhancedContainerSandbox;
 pub use seccomp::{SeccompManager, SecurityLevel, ViolationDetector};
 
+/// What an execution mode actually enforced, control by control, on the
+/// platform the run happened on. Written into the receipt so a recipient
+/// reads the controls that were in force rather than inferring them from a
+/// mode's name. "Isolated" is not a guarantee; each row here is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationReport {
+    /// `none`, `process`, `container` or `strict-container`.
+    pub mode: String,
+    /// The OS the controls were applied on, since what a mode can enforce
+    /// depends on it.
+    pub platform: String,
+    pub controls: Vec<IsolationControl>,
+    /// Steps that ran in a capsule instead: the capsule's own container
+    /// controls applied to them (no network, read-only root, declared
+    /// environment only), not the rows above.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capsule_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationControl {
+    /// `network`, `filesystem`, `capabilities`, `environment`, `memory`,
+    /// `open-files`, `cpu` or `timeout`.
+    pub name: String,
+    pub status: ControlStatus,
+    /// What enforced it, or why nothing did.
+    pub detail: String,
+}
+
+/// Three states, deliberately: a control that exists but was not applied
+/// and a control the platform cannot apply are both "not enforced", and a
+/// reader needs to know which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlStatus {
+    Enforced,
+    NotEnforced,
+    NotAvailable,
+}
+
+fn control(name: &str, status: ControlStatus, detail: impl Into<String>) -> IsolationControl {
+    IsolationControl {
+        name: name.to_string(),
+        status,
+        detail: detail.into(),
+    }
+}
+
+/// The report for a run with no sandbox at all.
+pub fn unisolated_report(hermetic_env: bool) -> IsolationReport {
+    IsolationReport {
+        mode: "none".to_string(),
+        platform: std::env::consts::OS.to_string(),
+        controls: vec![
+            control(
+                "network",
+                ControlStatus::NotEnforced,
+                "steps run as ordinary processes",
+            ),
+            control(
+                "filesystem",
+                ControlStatus::NotEnforced,
+                "steps see the whole filesystem",
+            ),
+            control(
+                "capabilities",
+                ControlStatus::NotEnforced,
+                "steps keep the runner's privileges",
+            ),
+            environment_control(hermetic_env),
+            control("memory", ControlStatus::NotEnforced, "no limit"),
+            control("open-files", ControlStatus::NotEnforced, "no limit"),
+            control("cpu", ControlStatus::NotEnforced, "no limit"),
+            control("timeout", ControlStatus::NotEnforced, "no limit"),
+        ],
+        capsule_steps: Vec::new(),
+    }
+}
+
+fn environment_control(hermetic_env: bool) -> IsolationControl {
+    if hermetic_env {
+        control(
+            "environment",
+            ControlStatus::Enforced,
+            "ambient environment not inherited; SOURCE_DATE_EPOCH, TZ and LC_ALL normalized",
+        )
+    } else {
+        control(
+            "environment",
+            ControlStatus::NotEnforced,
+            "the runner's environment is inherited",
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     pub isolation_level: IsolationLevel,
@@ -28,6 +125,15 @@ pub struct SandboxConfig {
     pub container_config: Option<ContainerConfig>,
     pub seccomp_profile: Option<String>,
     pub security_level: SecurityLevel,
+    /// Whether the step inherits the ambient environment. `false` under a
+    /// hermetic run: the command gets exactly the variables it is given
+    /// (plus PATH, to find tools), nothing from the runner.
+    #[serde(default = "default_inherit_environment")]
+    pub inherit_environment: bool,
+}
+
+fn default_inherit_environment() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -108,6 +214,7 @@ impl Default for SandboxConfig {
             container_config: None,
             seccomp_profile: Some("minimal".to_string()),
             security_level: SecurityLevel::Minimal,
+            inherit_environment: true,
         }
     }
 }
@@ -286,8 +393,19 @@ impl Sandbox {
         let mut cmd = Command::new(command);
         cmd.args(args);
 
-        // Set environment variables
-        let mut effective_env = std::env::vars().collect::<HashMap<_, _>>();
+        // Set environment variables. Hermetic: nothing ambient reaches the
+        // step; PATH is kept only so that tools resolve, and only when the
+        // step did not set it.
+        let mut effective_env: HashMap<String, String> = if self.config.inherit_environment {
+            std::env::vars().collect()
+        } else {
+            cmd.env_clear();
+            std::env::var("PATH")
+                .ok()
+                .map(|path| ("PATH".to_string(), path))
+                .into_iter()
+                .collect()
+        };
         effective_env.extend(env.clone());
 
         // Add deterministic time if configured
@@ -359,6 +477,16 @@ impl Sandbox {
         }
 
         effective_env.extend(env.clone());
+        if !self.config.inherit_environment {
+            // Hermetic: nothing ambient reaches the step. PATH is kept only
+            // so that tools resolve, and only when the step did not set it.
+            cmd.env_clear();
+            if !effective_env.contains_key("PATH") {
+                if let Ok(path) = std::env::var("PATH") {
+                    cmd.env("PATH", path);
+                }
+            }
+        }
         cmd.envs(&effective_env);
 
         if let Some(dir) = working_dir {
@@ -438,6 +566,213 @@ impl Sandbox {
         enhanced_sandbox
             .execute_secure(command, args, env, working_dir)
             .await
+    }
+
+    /// The controls this sandbox actually applies, as configured, on this
+    /// platform. Every row is derived from the code path that would enforce
+    /// it; a policy that is configured but has no enforcement in the chosen
+    /// mode is reported as not enforced, by name.
+    pub fn isolation_report(&self, hermetic_env: bool) -> IsolationReport {
+        use ControlStatus::{Enforced, NotAvailable, NotEnforced};
+        let platform = std::env::consts::OS.to_string();
+        let limits = &self.config.resource_limits;
+        let unix = cfg!(unix);
+        let network_policy = format!("{:?}", self.config.network_policy).to_lowercase();
+
+        let (mode, controls) = match self.config.isolation_level {
+            IsolationLevel::None | IsolationLevel::VM => {
+                let report = unisolated_report(hermetic_env);
+                return IsolationReport { platform, ..report };
+            }
+            IsolationLevel::Process => {
+                let rlimit = |set: bool, what: &str| {
+                    if !unix {
+                        (
+                            NotAvailable,
+                            format!("{what} needs a Unix rlimit; none on {platform}"),
+                        )
+                    } else if set {
+                        (Enforced, format!("{what} via setrlimit before exec"))
+                    } else {
+                        (NotEnforced, "no limit configured".to_string())
+                    }
+                };
+                let (memory, memory_detail) = rlimit(limits.memory_mb.is_some(), "RLIMIT_AS");
+                let (files, files_detail) = rlimit(limits.max_files.is_some(), "RLIMIT_NOFILE");
+                (
+                    "process".to_string(),
+                    vec![
+                        control(
+                            "network",
+                            NotEnforced,
+                            format!(
+                                "process isolation has no network control; the configured policy \
+                                 '{network_policy}' is not applied, steps can reach the network"
+                            ),
+                        ),
+                        control(
+                            "filesystem",
+                            NotEnforced,
+                            "process isolation has no filesystem control; steps see the whole filesystem",
+                        ),
+                        control(
+                            "capabilities",
+                            NotEnforced,
+                            "no seccomp or capability drop outside a container; steps keep the runner's privileges",
+                        ),
+                        environment_control(hermetic_env && !self.config.inherit_environment),
+                        control("memory", memory, memory_detail),
+                        control("open-files", files, files_detail),
+                        control(
+                            "cpu",
+                            NotEnforced,
+                            "advisory only; no portable per-process core cap",
+                        ),
+                        if limits.timeout_secs.is_some() {
+                            control(
+                                "timeout",
+                                Enforced,
+                                "the step is killed when its timeout elapses",
+                            )
+                        } else {
+                            control(
+                                "timeout",
+                                NotEnforced,
+                                "no sandbox-level timeout; per-step timeouts apply when declared",
+                            )
+                        },
+                    ],
+                )
+            }
+            IsolationLevel::Container => (
+                "container".to_string(),
+                vec![
+                    if self.config.network_policy == NetworkPolicy::Disabled {
+                        control("network", Enforced, "container run with --network none")
+                    } else {
+                        control(
+                            "network",
+                            NotEnforced,
+                            format!("container run with a '{network_policy}' network"),
+                        )
+                    },
+                    control(
+                        "filesystem",
+                        NotEnforced,
+                        "the workspace is mounted writable; the root filesystem is the image's",
+                    ),
+                    control(
+                        "capabilities",
+                        NotEnforced,
+                        "the runtime's default capability set; no seccomp profile passed",
+                    ),
+                    control(
+                        "environment",
+                        Enforced,
+                        "only declared variables reach the container",
+                    ),
+                    if limits.memory_mb.is_some() {
+                        control("memory", Enforced, "container run with --memory")
+                    } else {
+                        control("memory", NotEnforced, "no limit configured")
+                    },
+                    control("open-files", NotEnforced, "the runtime's default"),
+                    if limits.cpu_cores.is_some() {
+                        control("cpu", Enforced, "container run with --cpus")
+                    } else {
+                        control("cpu", NotEnforced, "no limit configured")
+                    },
+                    if limits.timeout_secs.is_some() {
+                        control(
+                            "timeout",
+                            Enforced,
+                            "the container is stopped when its timeout elapses",
+                        )
+                    } else {
+                        control("timeout", NotEnforced, "no limit configured")
+                    },
+                ],
+            ),
+            IsolationLevel::StrictContainer => {
+                let hardened = self.config.security_level != SecurityLevel::Minimal;
+                let profile = self
+                    .config
+                    .seccomp_profile
+                    .clone()
+                    .unwrap_or_else(|| "minimal".to_string());
+                (
+                    "strict-container".to_string(),
+                    vec![
+                        if self.config.network_policy == NetworkPolicy::Disabled {
+                            control("network", Enforced, "container run with --network none")
+                        } else {
+                            control(
+                                "network",
+                                NotEnforced,
+                                format!("container run with a '{network_policy}' network"),
+                            )
+                        },
+                        if hardened {
+                            control(
+                                "filesystem",
+                                Enforced,
+                                "--read-only root with a noexec tmpfs; the workspace mount stays writable",
+                            )
+                        } else {
+                            control(
+                                "filesystem",
+                                NotEnforced,
+                                "minimal security level: the root filesystem is writable",
+                            )
+                        },
+                        control(
+                            "capabilities",
+                            Enforced,
+                            if hardened {
+                                format!("seccomp profile '{profile}', --cap-drop ALL, no-new-privileges")
+                            } else {
+                                format!("seccomp profile '{profile}'")
+                            },
+                        ),
+                        control(
+                            "environment",
+                            Enforced,
+                            "only declared variables reach the container",
+                        ),
+                        if limits.memory_mb.is_some() {
+                            control("memory", Enforced, "container run with --memory")
+                        } else {
+                            control("memory", NotEnforced, "no limit configured")
+                        },
+                        if self.config.security_level == SecurityLevel::Maximum {
+                            control("open-files", Enforced, "--ulimit nofile=1024")
+                        } else {
+                            control("open-files", NotEnforced, "the runtime's default")
+                        },
+                        if limits.cpu_cores.is_some() {
+                            control("cpu", Enforced, "container run with --cpus")
+                        } else {
+                            control("cpu", NotEnforced, "no limit configured")
+                        },
+                        if limits.timeout_secs.is_some() {
+                            control(
+                                "timeout",
+                                Enforced,
+                                "the container is stopped when its timeout elapses",
+                            )
+                        } else {
+                            control("timeout", NotEnforced, "no limit configured")
+                        },
+                    ],
+                )
+            }
+        };
+        IsolationReport {
+            mode,
+            platform,
+            controls,
+            capsule_steps: Vec::new(),
+        }
     }
 
     /// Get security violation statistics
