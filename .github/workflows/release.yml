@@ -146,7 +146,7 @@ jobs:
           shasum -a 256 "$PKG" > "$PKG.sha256"
           echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: |
@@ -183,7 +183,7 @@ jobs:
           cp "target/package/continuum-attest-${version}.crate" .
           echo "crate=continuum-attest-${version}.crate" >> "$GITHUB_OUTPUT"
         id: pkg
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: crate
           path: ${{ steps.pkg.outputs.crate }}
@@ -200,7 +200,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
@@ -227,7 +227,7 @@ jobs:
           ls -R artifacts
           tools/release-binding.sh attest
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: receipts-unsigned
           path: .attest/receipts/
@@ -255,14 +255,14 @@ jobs:
 
       - run: cargo build --release --locked
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: receipts-unsigned
           path: .attest/receipts
 
       # The published set, as the evidence job saw it, so that the binding
       # can be checked here, on every run, tag or rehearsal.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
       - run: rm -rf artifacts/receipts-unsigned
@@ -325,7 +325,7 @@ jobs:
       # skips hidden paths by default, so the receipts silently never
       # uploaded. if-no-files-found: error, because a release whose evidence
       # is missing should fail rather than ship.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: receipts
           path: .attest/receipts/
@@ -347,7 +347,7 @@ jobs:
       - run: cargo install cargo-cyclonedx --version 0.5.9 --locked
       - name: Generate CycloneDX SBOM
         run: cargo cyclonedx --format json --all --override-filename attest-sbom
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
           path: attest-sbom.json
@@ -379,7 +379,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
 
