@@ -578,3 +578,52 @@ fn capsule_cannot_rewrite_inputs_through_a_workspace_snapshot_alias() {
         .assert()
         .success();
 }
+
+/// Issue #39: the receipt declares a capsule's filesystem control as
+/// enforced, so the control has to be shown to bite. The root filesystem
+/// of a capsule is read-only: a write anywhere outside the workspace
+/// mount fails, while the workspace itself stays writable for outputs.
+#[test]
+fn capsule_root_filesystem_is_read_only() {
+    let Some(image) = pulled_busybox_ref() else {
+        eprintln!("skipping capsule_root_filesystem_is_read_only: no container runtime");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    capsule::init(dir.path(), "rofs", &image).expect("init");
+    let manifest = capsule::load(dir.path(), "rofs").expect("load");
+    let output = capsule::run_captured(
+        &manifest,
+        dir.path(),
+        &attest::capsule::InputMounts::none(),
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "touch /etc/planted 2>/dev/null || touch /usr/planted 2>/dev/null".to_string(),
+        ],
+    )
+    .expect("run");
+    assert!(
+        !output.status.success(),
+        "a write outside the workspace must fail in a capsule"
+    );
+    let output = capsule::run_captured(
+        &manifest,
+        dir.path(),
+        &attest::capsule::InputMounts::none(),
+        &[
+            "sh".to_string(),
+            "-c".to_string(),
+            "echo out > out.txt".to_string(),
+        ],
+    )
+    .expect("run");
+    assert!(
+        output.status.success(),
+        "the workspace mount stays writable"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "out\n"
+    );
+}
