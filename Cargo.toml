@@ -58,7 +58,7 @@ ed25519-dalek = { version = "2.0", features = ["rand_core", "pkcs8", "pem"] }
 # stack cannot accept; see the signing-stack group in dependabot.yml.
 rand_core = { version = "0.6", features = ["getrandom"] }
 hex = "0.4"
-toml = "0.8"
+toml = "1.1"
 tar = "0.4"
 zstd = "0.13"
 
