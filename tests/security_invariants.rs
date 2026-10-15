@@ -2142,6 +2142,147 @@ fn forging_acceptance_with_a_revocation_dated_too_late_is_refused() {
     verify(1);
 }
 
+/// A local revocation without a date rejects every signature. An issuer
+/// cannot reopen a signing window by supplying a date in a later bundle.
+#[test]
+fn forging_acceptance_by_dating_an_unconditional_revocation_is_refused() {
+    use attest::keys::{KeyStore, TrustPolicy};
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let store = KeyStore::new(producer.path());
+    let issuer = store.generate("authority").unwrap();
+    let signer = store.generate("builder").unwrap();
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &signer])
+        .assert()
+        .success();
+    let receipt = run_receipt_path(producer.path());
+    let bundle_path = producer.path().join("bundle.json");
+    let export = || {
+        let bundle = attest::trust::produce(
+            producer.path(),
+            Some(&issuer),
+            chrono::Duration::days(30),
+            None,
+        )
+        .unwrap();
+        attest::trust::write(&bundle, &bundle_path).unwrap();
+    };
+    export();
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .args([
+            "trust",
+            "import",
+            bundle_path.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .assert()
+        .success();
+    let local = KeyStore::new(recipient.path());
+    local.revoke(&signer).unwrap();
+    let mut policy = TrustPolicy::load(&local.trust_dir()).unwrap();
+    policy
+        .keys
+        .iter_mut()
+        .find(|k| k.id == signer)
+        .unwrap()
+        .revoked_at = None;
+    policy.save(&local.trust_dir()).unwrap();
+    let verify = || {
+        attest()
+            .current_dir(recipient.path())
+            .args([
+                "verify",
+                receipt.to_str().unwrap(),
+                "--trust-receipt-timestamp",
+                "--require",
+                "signature,trust",
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicates::str::contains("after its revocation"));
+    };
+    verify();
+
+    store.revoke(&signer).unwrap();
+    export();
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "refresh", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(TrustPolicy::load(&local.trust_dir())
+        .unwrap()
+        .entry(&signer)
+        .unwrap()
+        .revoked_at
+        .is_none());
+    verify();
+}
+
+/// A workspace-root declaration used to disappear from the capsule mounts,
+/// so the step read the writable host files while claiming frozen inputs.
+#[cfg(unix)]
+#[test]
+fn forging_frozen_inputs_with_a_workspace_root_declaration_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    for input in [".", "./", "././", ""] {
+        let pipeline = format!(
+            "version: \"1.0\"\nname: root-input\nsteps:\n  read:\n    run: \"cat in.txt\"\n    inputs: [{}]\n    outputs: []\n    capsule: frozen\n    cache: false\n",
+            serde_json::to_string(input).unwrap()
+        );
+        let dir = workspace(&pipeline);
+        std::fs::write(dir.path().join("in.txt"), "original\n").unwrap();
+        attest::capsule::init(
+            dir.path(),
+            "frozen",
+            &format!("busybox@sha256:{}", "0".repeat(64)),
+        )
+        .unwrap();
+        let runtime_dir = tempfile::tempdir().unwrap();
+        let marker = runtime_dir.path().join("producer-ran");
+        let runtime = runtime_dir.path().join("docker");
+        std::fs::write(
+            &runtime,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        attest()
+            .current_dir(dir.path())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    runtime_dir.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .arg("run")
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("workspace root"));
+        assert!(
+            !marker.exists(),
+            "a refused input must never reach the runtime"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path().join(".attest/receipts"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("in.txt")).unwrap(),
+            "original\n"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

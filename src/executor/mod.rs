@@ -95,6 +95,7 @@ impl InputSnapshot {
         step: &crate::pipeline::Step,
         expected_input_hash: &str,
     ) -> Result<Self> {
+        crate::capsule::validate_input_paths(&step.inputs)?;
         let directory = tempfile::Builder::new()
             .prefix("attest-inputs-")
             .tempdir()?;
@@ -307,6 +308,30 @@ struct InputGuard {
     enforced: bool,
 }
 
+/// Open without following a final symlink, then use this descriptor for
+/// both identity checks and chmod. Nonblocking avoids hanging if a racing
+/// writer replaces a regular file with a FIFO. Descriptors are closed
+/// after each operation, so a large input tree does not exhaust RLIMIT_NOFILE.
+#[cfg(unix)]
+fn open_input(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn restore_input_permissions(
+    file: &std::fs::File,
+    path: &std::path::Path,
+    mode: u32,
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("cannot restore input permissions for {}", path.display()))
+}
+
 impl InputGuard {
     fn hold(workspace: &std::path::Path, inputs: &[std::path::PathBuf]) -> Result<Self> {
         #[cfg(unix)]
@@ -352,7 +377,16 @@ impl InputGuard {
                     if mode & 0o222 == 0 {
                         continue;
                     }
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & !0o222))
+                    let file = open_input(&path)
+                        .with_context(|| format!("cannot open input {}", path.display()))?;
+                    let opened = file.metadata()?;
+                    if opened.dev() != meta.dev() || opened.ino() != meta.ino() {
+                        anyhow::bail!(
+                            "input {} changed while acquiring its permissions",
+                            path.display()
+                        );
+                    }
+                    file.set_permissions(std::fs::Permissions::from_mode(mode & !0o222))
                         .map_err(|e| {
                             anyhow::anyhow!("cannot make input {} read-only: {e}", path.display())
                         })?;
@@ -380,20 +414,71 @@ impl Drop for InputGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            use std::os::unix::fs::MetadataExt;
             for (path, mode, dev, ino) in self.restore.drain(..).rev() {
                 // Only the object whose bits were dropped gets them back.
                 // A link now standing at the path, or another file moved
                 // there, is left exactly as the step left it.
-                let Ok(now) = std::fs::symlink_metadata(&path) else {
+                let Ok(file) = open_input(&path) else {
                     continue;
                 };
-                if now.file_type().is_symlink() || now.dev() != dev || now.ino() != ino {
+                let Ok(now) = file.metadata() else {
+                    continue;
+                };
+                if now.dev() != dev || now.ino() != ino {
                     continue;
                 }
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+                let _ = restore_input_permissions(&file, &path, mode);
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod input_guard_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    /// Swap the path after the identity check, at the old chmod race.
+    /// The descriptor still targets the original inode, even after a rename.
+    #[test]
+    fn restoring_permissions_after_a_path_swap_does_not_follow_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let moved = dir.path().join("moved");
+        let secret = dir.path().join("secret");
+        std::fs::write(&input, "input").unwrap();
+        std::fs::write(&secret, "secret").unwrap();
+        std::fs::set_permissions(&input, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = open_input(&input).unwrap();
+        assert_eq!(
+            file.metadata().unwrap().ino(),
+            std::fs::metadata(&input).unwrap().ino()
+        );
+
+        std::fs::rename(&input, &moved).unwrap();
+        std::os::unix::fs::symlink(&secret, &input).unwrap();
+        restore_input_permissions(&file, &input, 0o644).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&moved).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn acquiring_permissions_refuses_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        let input = dir.path().join("input");
+        std::fs::write(&secret, "secret").unwrap();
+        std::os::unix::fs::symlink(&secret, &input).unwrap();
+        assert!(open_input(&input).is_err());
     }
 }
 
@@ -584,6 +669,7 @@ impl<'a> Executor<'a> {
                 .capsule
                 .as_deref()
                 .map(|name| {
+                    crate::capsule::validate_input_paths(&step.inputs)?;
                     let workspace = std::env::current_dir()?;
                     crate::capsule::load(&workspace, name)
                 })

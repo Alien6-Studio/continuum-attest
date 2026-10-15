@@ -191,7 +191,8 @@ you discover it during an audit:
   outputs cannot be written there. The snapshot is outside the writable
   workspace, so a step cannot reach it through another writable path. The runtime refuses writes from inside, and changes to the
   original workspace during the step never reach its view. Capsule input paths
-  must be relative without `..`, and symbolic links must use relative targets
+  must name paths below the workspace root, relative without `..` (`.` and
+  empty paths are refused), and symbolic links must use relative targets
   covered by the declared inputs. That is enforced, and the `inputs` row of the
   receipt's isolation block says `enforced` only when every step ran in a
   capsule. A local step gets its inputs' write bits dropped while it runs, which
@@ -226,7 +227,9 @@ you discover it during an audit:
   they import a bundle you issued afterwards. Nothing pushes that bundle to
   them, and nothing fetches it: trust material moves as a file, by a channel
   you both chose. A revocation only ever moves earlier: a later bundle that
-  dates it sooner tightens it, one that dates it later changes nothing. What the verifier can say is how current its material is,
+  dates it sooner tightens it, one that dates it later changes nothing. A local
+  revocation without a date rejects every signature and stays in force when a
+  dated revocation arrives. What the verifier can say is how current its material is,
   the bundle its revocations are known up to and whether that bundle has
   expired, and it says so in every verdict. Revocation protects a verifier
   who has refreshed; it does not reach one who has not.

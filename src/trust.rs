@@ -746,11 +746,12 @@ pub fn import(
                 // a key was compromised before the date first recorded
                 // moves the revocation back, and every signature between
                 // the two dates has to fall with it; a later date never
-                // reopens a window.
+                // reopens a window. No local date means always revoked,
+                // which is stricter than every dated bundle revocation.
                 (KeyStatus::Revoked, KeyStatus::Revoked)
                     if key
                         .revoked_at
-                        .is_some_and(|at| entry.revoked_at.is_none_or(|known| at < known)) =>
+                        .is_some_and(|at| entry.revoked_at.is_some_and(|known| at < known)) =>
                 {
                     entry.revoked_at = key.revoked_at;
                     report.revocation_moved_earlier.push((

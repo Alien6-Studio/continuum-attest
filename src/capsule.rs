@@ -205,6 +205,31 @@ pub fn runtime_binary() -> Option<&'static str> {
     }
 }
 
+/// A workspace-root input cannot be overlaid on the writable workspace
+/// mount. Reject it instead of silently running without its snapshot.
+pub(crate) fn validate_input_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let mut named = false;
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(_) => named = true,
+                std::path::Component::CurDir => {}
+                _ => anyhow::bail!(
+                    "capsule input {} must be a relative path without '..'",
+                    path.display()
+                ),
+            }
+        }
+        if !named {
+            anyhow::bail!(
+                "capsule input '{}' names the workspace root; declare paths below it instead of '.' or an empty path",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build the full `docker`/`podman` argument vector for a capsule run.
 /// Split out of [`run`] so tests can assert the exact isolation flags
 /// without a container runtime.
@@ -328,6 +353,7 @@ pub fn run_captured(
     inputs: &InputMounts,
     command: &[String],
 ) -> Result<std::process::Output> {
+    validate_input_paths(&inputs.paths)?;
     let binary = runtime_binary()
         .context("no container runtime found (docker or podman required for capsule steps)")?;
     let workspace = workspace

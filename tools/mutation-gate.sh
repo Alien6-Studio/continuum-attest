@@ -51,6 +51,8 @@ trap restore EXIT
 # truth and names the fix.
 mutate () {
   local name=$1 file=$2 suite=$3 expect=$4 script=$5
+  local target=(--test "$suite")
+  if [ "$suite" = lib ]; then target=(--lib); fi
   CHECKED=$((CHECKED + 1))
 
   if ! python3 - "$file" <<PY
@@ -74,7 +76,7 @@ PY
   # merely broke the build as a protection verified. That is the exact
   # failure this gate exists to catch, so it is checked for here first.
   local output
-  if ! output=$($CARGO test --locked --no-run --test "$suite" 2>&1); then
+  if ! output=$($CARGO test --locked --no-run "${target[@]}" 2>&1); then
     echo "FAIL  ${name}: the mutated tree does not build, so nothing was tested" >&2
     echo "$output" | grep -E "^error" | head -3 >&2
     FAILURES=$((FAILURES + 1))
@@ -82,7 +84,7 @@ PY
     return
   fi
 
-  output=$($CARGO test --locked --test "$suite" "$expect" 2>&1)
+  output=$($CARGO test --locked "${target[@]}" "$expect" 2>&1)
   local status=$?
 
   # A filter that matches nothing runs zero tests and exits zero, which would
@@ -306,15 +308,34 @@ new = s.replace(old, "            input.components().last().and_then(|c| match c
 
 mutate "the guard restores only the object it held" src/executor/mod.rs \
   security_invariants forging_a_permission_change_on_a_foreign_file_through_the_guard_is_refused \
-  'old = "                if now.file_type().is_symlink() || now.dev() != dev || now.ino() != ino {"
-assert s.count(old) == 1, "guard restore identity check moved"
-new = s.replace(old, "                if false {")'
+  'start = s.index("                let Ok(file) = open_input(&path) else {", s.index("impl Drop for InputGuard"))
+end = s.index("                let _ = restore_input_permissions(&file, &path, mode);", start)
+end += len("                let _ = restore_input_permissions(&file, &path, mode);")
+new = s[:start] + "                let _ = std::fs::set_permissions(&path, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(mode));" + s[end:]'
+
+mutate "restoring permissions cannot follow a path swapped after the identity check" src/executor/mod.rs \
+  lib restoring_permissions_after_a_path_swap_does_not_follow_the_link \
+  'old = "    file.set_permissions(std::fs::Permissions::from_mode(mode))"
+assert s.count(old) == 1, "descriptor restore moved"
+new = s.replace(old, "    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))")'
+
+mutate "capsule workspace-root inputs are refused" src/capsule.rs \
+  security_invariants forging_frozen_inputs_with_a_workspace_root_declaration_is_refused \
+  'old = "        if !named {"
+assert s.count(old) == 1, "workspace-root validation moved"
+new = s.replace(old, "        if false {")'
 
 mutate "a revocation only moves earlier" src/trust.rs \
   security_invariants forging_acceptance_with_a_revocation_dated_too_late_is_refused \
-  'old = ".is_some_and(|at| entry.revoked_at.is_none_or(|known| at < known)) =>"
+  'old = ".is_some_and(|at| entry.revoked_at.is_some_and(|known| at < known)) =>"
 assert s.count(old) == 1, "earlier-revocation arm moved"
 new = s.replace(old, ".is_some_and(|_| false) =>")'
+
+mutate "an undated local revocation cannot acquire a date" src/trust.rs \
+  security_invariants forging_acceptance_by_dating_an_unconditional_revocation_is_refused \
+  'old = ".is_some_and(|at| entry.revoked_at.is_some_and(|known| at < known)) =>"
+assert s.count(old) == 1, "undated-revocation check moved"
+new = s.replace(old, ".is_some_and(|at| entry.revoked_at.is_none_or(|known| at < known)) =>")'
 
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
