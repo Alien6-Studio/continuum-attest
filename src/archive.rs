@@ -146,114 +146,6 @@ impl<R: Read> Read for Bounded<R> {
     }
 }
 
-/// A reader that looks at every physical tar header as it streams past,
-/// before the tar crate acts on it: counts entries, bounds each entry's
-/// declared size, and refuses the extension records (GNU long name, GNU
-/// long link, PAX) that the crate would otherwise read into memory and
-/// fold into the next entry, past the limits. Zero blocks (end of
-/// archive) pass through. The crate still parses the archive; this makes
-/// sure the limits are checked against what is on the wire.
-struct Scanned<R> {
-    inner: R,
-    limits: ArchiveLimits,
-    /// Bytes of the current record still to pass before the next header.
-    remaining: u64,
-    /// Partial header bytes gathered so far (headers can straddle reads).
-    header: Vec<u8>,
-    entries: usize,
-}
-
-impl<R: Read> Scanned<R> {
-    fn inspect(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        let mut rest = buf;
-        while !rest.is_empty() {
-            if self.remaining > 0 {
-                let skip = self.remaining.min(rest.len() as u64) as usize;
-                self.remaining -= skip as u64;
-                rest = &rest[skip..];
-                continue;
-            }
-            let need = 512 - self.header.len();
-            let take = need.min(rest.len());
-            self.header.extend_from_slice(&rest[..take]);
-            rest = &rest[take..];
-            if self.header.len() < 512 {
-                continue;
-            }
-            let header = std::mem::take(&mut self.header);
-            if header.iter().all(|b| *b == 0) {
-                continue; // end-of-archive marker
-            }
-            let kind = header[156];
-            let size = parse_octal(&header[124..136]);
-            let refuse = |limit: &'static str, detail: String| {
-                std::io::Error::other(ResourceLimit { limit, detail })
-            };
-            if matches!(kind, b'L' | b'K' | b'x' | b'g') {
-                return Err(std::io::Error::other(format!(
-                    "archive carries a tar extension record (type '{}'); an attest archive has none",
-                    kind as char
-                )));
-            }
-            self.entries += 1;
-            if self.entries > self.limits.entries {
-                return Err(refuse(
-                    "entries",
-                    format!("the archive has more than {} entries", self.limits.entries),
-                ));
-            }
-            if size > self.limits.entry {
-                return Err(refuse(
-                    "entry",
-                    format!(
-                        "an entry declares {} bytes; the limit is {}",
-                        size, self.limits.entry
-                    ),
-                ));
-            }
-            // Data is padded to a 512-byte boundary.
-            self.remaining = size.div_ceil(512) * 512;
-        }
-        Ok(())
-    }
-}
-
-impl<R: Read> Read for Scanned<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.inspect(&buf[..n])?;
-        Ok(n)
-    }
-}
-
-/// The size field of a ustar header: octal digits, space or NUL padded.
-/// Anything else (base-256 for huge sizes, garbage) reads as `u64::MAX`,
-/// which no entry limit admits.
-fn parse_octal(field: &[u8]) -> u64 {
-    let digits: Vec<u8> = field
-        .iter()
-        .copied()
-        .take_while(|b| *b != 0 && *b != b' ')
-        .collect();
-    if digits.is_empty() {
-        return 0;
-    }
-    let mut value: u64 = 0;
-    for b in digits {
-        if !(b'0'..=b'7').contains(&b) {
-            return u64::MAX;
-        }
-        value = match value
-            .checked_mul(8)
-            .and_then(|v| v.checked_add(u64::from(b - b'0')))
-        {
-            Some(v) => v,
-            None => return u64::MAX,
-        };
-    }
-    value
-}
-
 /// Lift a `ResourceLimit` out of an `io::Error` that wrapped it, so it
 /// stays recognisable through tar's own error wrapping.
 fn surface_limit(err: std::io::Error) -> anyhow::Error {
@@ -301,21 +193,14 @@ pub fn read_archive_bounded(path: &Path, limits: &ArchiveLimits) -> Result<Vec<A
         remaining: limits.decompressed,
         limit: limits.decompressed,
     };
-    let scanned = Scanned {
-        inner: bounded,
-        limits: *limits,
-        remaining: 0,
-        header: Vec::with_capacity(512),
-        entries: 0,
-    };
-
-    let mut archive = tar::Archive::new(scanned);
+    let mut archive = tar::Archive::new(bounded);
     let mut entries: Vec<ArchiveEntry> = Vec::new();
     let mut seen = HashSet::new();
     let iterator = archive
         .entries()
         .map_err(surface_limit)
-        .context("cannot list archive entries")?;
+        .context("cannot list archive entries")?
+        .raw(true);
     for (index, entry) in iterator.enumerate() {
         if index >= limits.entries {
             bail!(ResourceLimit {
@@ -326,29 +211,16 @@ pub fn read_archive_bounded(path: &Path, limits: &ArchiveLimits) -> Result<Vec<A
         let mut entry = entry
             .map_err(surface_limit)
             .context("corrupt archive entry")?;
-        // PAX extensions and GNU long names are physical entries the tar
-        // reader folds into the next one, past the entry count and the
-        // per-entry size. The writer produces neither, so a reader has no
-        // reason to accept them.
-        if entry.pax_extensions().map_err(surface_limit)?.is_some() {
-            bail!("archive entry carries PAX extensions; an attest archive has none");
-        }
-        let raw_path = entry
-            .header()
-            .path()
-            .map_err(anyhow::Error::new)?
-            .into_owned();
-        let full_path = entry
-            .path()
-            .context("archive entry has an unreadable path")?
-            .into_owned();
-        if raw_path != full_path {
+        // Raw iteration exposes each physical header without reading or
+        // absorbing extension payloads. Refuse metadata records before any
+        // attacker-chosen body is allocated or parsed.
+        let kind = entry.header().entry_type();
+        if matches!(kind.as_byte(), b'L' | b'K' | b'x' | b'g') {
             bail!(
-                "archive entry {} uses a long-name extension; an attest archive has none",
-                full_path.display()
+                "archive carries a tar extension record (type '{}'); an attest archive has none",
+                kind.as_byte() as char
             );
         }
-        let kind = entry.header().entry_type();
         if kind != tar::EntryType::Regular {
             bail!(
                 "archive entry {} is not a regular file ({:?}); an attest archive holds only files",
@@ -392,7 +264,7 @@ pub fn read_archive_bounded(path: &Path, limits: &ArchiveLimits) -> Result<Vec<A
         let mut bytes = Vec::new();
         entry
             .by_ref()
-            .take(limits.entry + 1)
+            .take(limits.entry.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(surface_limit)?;
         if bytes.len() as u64 > limits.entry {

@@ -292,6 +292,18 @@ fn verify_recompute_fails_when_pipeline_drops_capsule() {
 /// Pull busybox and return its digest-pinned reference, or None (skip).
 fn pulled_busybox_ref() -> Option<String> {
     let binary = capsule::runtime_binary()?;
+    if let Ok(image) = std::env::var("ATTEST_TEST_CAPSULE_IMAGE") {
+        capsule::validate_image_ref(&image).expect("digest-pinned test image");
+        let inspect = StdCommand::new(binary)
+            .args(["image", "inspect", &image])
+            .output()
+            .expect("inspect local test image");
+        assert!(
+            inspect.status.success(),
+            "configured capsule test image is not available locally"
+        );
+        return Some(image);
+    }
     let pull = StdCommand::new(binary)
         .args(["pull", "-q", "docker.io/library/busybox:latest"])
         .output()
@@ -437,18 +449,42 @@ fn capsule_step_reads_a_frozen_copy_of_its_inputs() {
     std::fs::write(dir.path().join("in.txt"), "original\n").unwrap();
     std::fs::write(
         dir.path().join("attest.yaml"),
-        "version: \"1.0\"\nname: frozen\nsteps:\n  read:\n    run: \"sleep 3 && cat in.txt > out.txt\"\n    inputs: [\"in.txt\"]\n    outputs: [\"out.txt\"]\n    capsule: frozen\n    cache: false\n",
+        "version: \"1.0\"\nname: frozen\nsteps:\n  read:\n    run: \"touch started && sleep 2 && cat in.txt > out.txt && touch consumed && sleep 2\"\n    inputs: [\"in.txt\"]\n    outputs: [\"out.txt\"]\n    capsule: frozen\n    cache: false\n",
     )
     .unwrap();
 
-    // The host-side tamper: after the step has started, change the input,
-    // then restore it before the step's re-hash.
+    // Open before InputGuard drops the write bits, as a concurrent editor
+    // could. A write through this descriptor really changes the host file;
+    // ignoring permission errors would never exercise the snapshot.
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.path().join("in.txt"))
+        .unwrap();
     let input = dir.path().join("in.txt");
+    let started = dir.path().join("started");
+    let consumed = dir.path().join("consumed");
     let tamper = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1200));
-        let _ = std::fs::write(&input, "tampered\n");
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        let _ = std::fs::write(&input, "original\n");
+        use std::io::{Seek, SeekFrom, Write};
+        let wait_for = |path: &Path| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            while !path.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "capsule did not create {}",
+                    path.display()
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        wait_for(&started);
+        writer.seek(SeekFrom::Start(0)).unwrap();
+        writer.write_all(b"tampered\n").unwrap();
+        writer.sync_all().unwrap();
+        assert_eq!(std::fs::read_to_string(&input).unwrap(), "tampered\n");
+        wait_for(&consumed);
+        writer.seek(SeekFrom::Start(0)).unwrap();
+        writer.write_all(b"original\n").unwrap();
+        writer.sync_all().unwrap();
     });
     let run = Command::cargo_bin("attest")
         .unwrap()
@@ -485,4 +521,60 @@ fn capsule_step_reads_a_frozen_copy_of_its_inputs() {
         .map(|d| d.count())
         .unwrap_or(0);
     assert_eq!(leftover, 0, "snapshot cleaned up");
+}
+
+/// A read-only bind mount is ineffective if the same backing files are
+/// reachable through the writable workspace. Attempt the old alias from
+/// inside a real capsule, then require both the original output and a
+/// signed, recomputed receipt.
+#[test]
+fn capsule_cannot_rewrite_inputs_through_a_workspace_snapshot_alias() {
+    let Some(image) = pulled_busybox_ref() else {
+        eprintln!("skipping snapshot alias test: no container runtime");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    attest_cmd()
+        .arg("init")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    attest_cmd()
+        .args(["keys", "generate", "--name", "test"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    capsule::init(dir.path(), "frozen", &image).unwrap();
+    std::fs::write(dir.path().join("in.txt"), "original\n").unwrap();
+    let command = "for input in .attest/snapshots/*/in.txt; do if [ -f \"$input\" ]; then printf 'tampered\\n' > \"$input\"; fi; done; cat in.txt > out.txt";
+    let pipeline = format!(
+        "version: \"1.0\"\nname: alias\nsteps:\n  read:\n    run: {}\n    inputs: [\"in.txt\"]\n    outputs: [\"out.txt\"]\n    capsule: frozen\n    cache: false\n",
+        serde_json::to_string(command).unwrap()
+    );
+    std::fs::write(dir.path().join("attest.yaml"), pipeline).unwrap();
+    attest_cmd()
+        .args(["run", "--sign"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+        "original\n"
+    );
+    let receipt = std::fs::read_dir(dir.path().join(".attest/receipts"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "yaml"))
+        .unwrap();
+    attest_cmd()
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--recompute",
+            "--require",
+            "signature,recompute,success",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
 }

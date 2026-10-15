@@ -288,9 +288,15 @@ new = s.replace(old, "    if false {\n        eprintln!(\n            \"error: r
 
 mutate "tar extension records are refused on the wire" src/archive.rs \
   archive_limits gnu_long_link_records_are_refused_on_the_wire \
-  'old = "            if matches!(kind, b\x27L\x27 | b\x27K\x27 | b\x27x\x27 | b\x27g\x27) {"
-assert s.count(old) == 1, "physical extension check moved"
-new = s.replace(old, "            if false {")'
+  'old = "        .raw(true);"
+assert s.count(old) == 1, "raw archive iteration moved"
+new = s.replace(old, "        .raw(false);")'
+
+mutate "capsule snapshots have no writable workspace alias" src/executor/mod.rs \
+  inputs_stable capsule_refuses_a_snapshot_directory_inside_the_workspace \
+  'old = "        if root.starts_with(workspace.canonicalize()?) {"
+assert s.count(old) == 1, "snapshot scope check moved"
+new = s.replace(old, "        if false {")'
 
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \

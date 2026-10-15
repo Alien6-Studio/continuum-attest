@@ -79,11 +79,13 @@ struct InputsHeld {
 }
 
 /// A copy of a step's declared inputs, taken at hashing time and hashed
-/// again to prove it is the state the receipt describes. Lives under
-/// `.attest/snapshots/` so a container runtime can bind-mount it; removed
-/// when dropped.
+/// again to prove it is the state the receipt describes. Kept outside
+/// the writable workspace so a step cannot change it through another
+/// mount of the same files; removed when dropped.
 struct InputSnapshot {
     root: std::path::PathBuf,
+    paths: Vec<std::path::PathBuf>,
+    _directory: tempfile::TempDir,
 }
 
 impl InputSnapshot {
@@ -93,17 +95,44 @@ impl InputSnapshot {
         step: &crate::pipeline::Step,
         expected_input_hash: &str,
     ) -> Result<Self> {
-        let root = workspace.join(".attest").join("snapshots").join(format!(
-            "{}-{}",
-            sanitize(step_name),
-            std::process::id()
-        ));
-        if root.exists() {
-            std::fs::remove_dir_all(&root)?;
+        let directory = tempfile::Builder::new()
+            .prefix("attest-inputs-")
+            .tempdir()?;
+        let root = directory.path().canonicalize()?;
+        if root.starts_with(workspace.canonicalize()?) {
+            anyhow::bail!("capsule snapshots require a temporary directory outside the workspace; set TMPDIR accordingly");
         }
-        std::fs::create_dir_all(&root)?;
-        let snapshot = Self { root };
+        // Copy each tree once. Repeated declarations and a directory
+        // declared alongside one of its children describe the same bytes.
+        let mut paths = Vec::new();
         for input in &step.inputs {
+            let mut relative = std::path::PathBuf::new();
+            for component in input.components() {
+                match component {
+                    std::path::Component::Normal(part) => relative.push(part),
+                    std::path::Component::CurDir => {}
+                    _ => anyhow::bail!(
+                        "capsule input {} must be a relative path without '..'",
+                        input.display()
+                    ),
+                }
+            }
+            paths.push(relative);
+        }
+        paths.sort();
+        paths.dedup();
+        let mut minimal = Vec::<std::path::PathBuf>::new();
+        for path in paths {
+            if !minimal.iter().any(|parent| path.starts_with(parent)) {
+                minimal.push(path);
+            }
+        }
+        let snapshot = Self {
+            root,
+            paths: minimal,
+            _directory: directory,
+        };
+        for input in &snapshot.paths {
             let from = workspace.join(input);
             let to = snapshot.root.join(input);
             if let Some(parent) = to.parent() {
@@ -129,20 +158,29 @@ impl InputSnapshot {
 
 impl Drop for InputSnapshot {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-fn sanitize(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '-'
+        // InputGuard made the source directories read-only before the
+        // copy. Restore access only on private snapshot directories, never
+        // following a link, so TempDir can remove their contents too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for entry in walkdir::WalkDir::new(&self.root)
+                .follow_links(false)
+                .into_iter()
+                .flatten()
+            {
+                if entry.file_type().is_dir() {
+                    if let Ok(meta) = entry.metadata() {
+                        let mode = meta.permissions().mode() | 0o700;
+                        let _ = std::fs::set_permissions(
+                            entry.path(),
+                            std::fs::Permissions::from_mode(mode),
+                        );
+                    }
+                }
             }
-        })
-        .collect()
+        }
+    }
 }
 
 /// Copy a file, a directory tree or a symbolic link as it is: links stay
@@ -152,6 +190,12 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(from)?;
     if meta.file_type().is_symlink() {
         let target = std::fs::read_link(from)?;
+        if target.is_absolute() {
+            anyhow::bail!(
+                "capsule snapshots require relative symbolic links: {}",
+                from.display()
+            );
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, to)?;
         #[cfg(not(unix))]
@@ -172,14 +216,88 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn step(inputs: &[&str]) -> crate::pipeline::Step {
+        let mut step: crate::pipeline::Step = serde_yaml::from_str("run: cat src/a.txt").unwrap();
+        step.inputs = inputs.iter().map(std::path::PathBuf::from).collect();
+        step
+    }
+
+    fn workspace() -> tempfile::TempDir {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("src")).unwrap();
+        std::fs::write(workspace.path().join("src/a.txt"), "original\n").unwrap();
+        workspace
+    }
+
+    fn hash(workspace: &std::path::Path, step: &crate::pipeline::Step) -> String {
+        crate::hashing::hash_inputs(workspace, "build", &step.run, &step.inputs).unwrap()
+    }
+
+    #[test]
+    fn snapshot_is_outside_the_writable_workspace() {
+        let workspace = workspace();
+        let step = step(&["src"]);
+        let expected = hash(workspace.path(), &step);
+        let guard = InputGuard::hold(workspace.path(), &step.inputs).unwrap();
+        let snapshot = InputSnapshot::take(workspace.path(), "build", &step, &expected).unwrap();
+        let root = snapshot.root.clone();
+        assert!(
+            !root
+                .canonicalize()
+                .unwrap()
+                .starts_with(workspace.path().canonicalize().unwrap()),
+            "a writable workspace alias would bypass the read-only input mount"
+        );
+        drop(snapshot);
+        assert!(
+            !root.exists(),
+            "read-only directories must be cleaned up too"
+        );
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_accepts_overlapping_and_repeated_inputs() {
+        let workspace = workspace();
+        std::os::unix::fs::symlink("src/a.txt", workspace.path().join("link")).unwrap();
+        let step = step(&["src", "src/a.txt", "link", "link", "src"]);
+        let expected = hash(workspace.path(), &step);
+        let snapshot = InputSnapshot::take(workspace.path(), "build", &step, &expected).unwrap();
+        assert_eq!(hash(&snapshot.root, &step), expected);
+        assert_eq!(
+            std::fs::read_to_string(snapshot.root.join("link")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[test]
+    fn snapshot_refuses_inputs_changed_since_hashing() {
+        let workspace = workspace();
+        let step = step(&["src"]);
+        let expected = hash(workspace.path(), &step);
+        std::fs::write(workspace.path().join("src/a.txt"), "changed\n").unwrap();
+        let error = InputSnapshot::take(workspace.path(), "build", &step, &expected)
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("changed between hashing and snapshot"));
+    }
+}
+
 /// Declared inputs held unwritable while a step runs, restored afterwards.
 ///
 /// Permission bits, not a mount: every regular file and directory under a
 /// declared input loses its write bits before the step starts and gets
 /// them back when the guard drops, on success or failure. A process
-/// running as the same user could put the bits back itself; that is what
-/// the re-hash after the step catches. Root is not bound by permission
-/// bits at all, and the guard says so rather than pretending.
+/// running as the same user could put the bits back itself; the re-hash
+/// catches only changes that are still present afterwards. Root is not
+/// bound by permission bits, and the receipt reports this limitation.
 struct InputGuard {
     restore: Vec<(std::path::PathBuf, u32)>,
     enforced: bool,
@@ -197,7 +315,12 @@ impl InputGuard {
                     enforced: false,
                 });
             }
-            let mut restore = Vec::new();
+            // Construct the guard before the first chmod so a later
+            // failure also restores paths already made read-only.
+            let mut guard = Self {
+                restore: Vec::new(),
+                enforced: true,
+            };
             for input in inputs {
                 let root = workspace.join(input);
                 let Ok(meta) = std::fs::symlink_metadata(&root) else {
@@ -227,13 +350,10 @@ impl InputGuard {
                         .map_err(|e| {
                             anyhow::anyhow!("cannot make input {} read-only: {e}", path.display())
                         })?;
-                    restore.push((path, mode));
+                    guard.restore.push((path, mode));
                 }
             }
-            Ok(Self {
-                restore,
-                enforced: true,
-            })
+            Ok(guard)
         }
         #[cfg(not(unix))]
         {
@@ -829,7 +949,7 @@ impl<'a> Executor<'a> {
         let snapshot = InputSnapshot::take(workspace, step_name, step, input_hash)?;
         let mounts = crate::capsule::InputMounts {
             root: snapshot.root.clone(),
-            paths: step.inputs.clone(),
+            paths: snapshot.paths.clone(),
         };
         let output = crate::capsule::run_captured(manifest, workspace, &mounts, &command);
         drop(snapshot);

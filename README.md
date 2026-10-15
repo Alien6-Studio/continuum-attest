@@ -185,9 +185,12 @@ you discover it during an audit:
   holds another key, does not load at all.
 - **Inputs are held still only inside a capsule, and the receipt says so.**
   A capsule step reads its declared inputs from a snapshot copied and hashed
-  when the receipt's input hash was taken, mounted read-only: the runtime
-  refuses a write from inside, and a change on the host during the step never
-  reaches the step's view. That is enforced, and the `inputs` row of the
+  when the receipt's input hash was taken, mounted read-only. The snapshot is
+  outside the writable workspace, so a step cannot reach it through another
+  writable path. The runtime refuses writes from inside, and changes to the
+  original workspace during the step never reach its view. Capsule input paths
+  must be relative without `..`, and symbolic links must use relative targets
+  covered by the declared inputs. That is enforced, and the `inputs` row of the
   receipt's isolation block says `enforced` only when every step ran in a
   capsule. A local step gets its inputs' write bits dropped while it runs, which
   refuses a plain write and nothing more: a step that puts the bits back,

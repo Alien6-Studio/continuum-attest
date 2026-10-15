@@ -251,3 +251,49 @@ fn a_capsule_mounts_declared_inputs_read_only() {
         "absent inputs are left to hashing to report"
     );
 }
+
+/// A custom TMPDIR inside the writable workspace would expose private
+/// snapshot files through a second mount. Refuse before invoking even a
+/// fake container runtime, so this invariant runs without Docker.
+#[cfg(unix)]
+#[test]
+fn capsule_refuses_a_snapshot_directory_inside_the_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = workspace(
+        "version: \"1.0\"\nname: private\nsteps:\n  read:\n    run: \"cat in.txt > out.txt\"\n    inputs: [\"in.txt\"]\n    outputs: [\"out.txt\"]\n    capsule: frozen\n    cache: false\n",
+    );
+    attest::capsule::init(
+        dir.path(),
+        "frozen",
+        &format!("busybox@sha256:{}", "0".repeat(64)),
+    )
+    .unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let runtime = bin.join("docker");
+    std::fs::write(
+        &runtime,
+        "#!/bin/sh\ntouch producer-ran\ncat in.txt > out.txt\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    attest()
+        .arg("run")
+        .env("TMPDIR", dir.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "temporary directory outside the workspace",
+        ));
+    assert!(!dir.path().join("producer-ran").exists());
+    assert!(receipt(dir.path()).is_none());
+}
