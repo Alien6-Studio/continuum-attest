@@ -228,17 +228,30 @@ pub fn run_args(
     // mount, from a snapshot taken when they were hashed, so the step
     // reads exactly the bytes the receipt describes: the runtime refuses
     // a write from inside, and a change on the host during the step never
-    // reaches the view. Sorted, so the argument vector is the same for the
-    // same declaration.
-    let mut sorted: Vec<&PathBuf> = inputs.paths.iter().collect();
-    sorted.sort();
-    sorted.dedup();
-    for input in sorted {
-        let host = inputs.root.join(input);
+    // reaches the view. The mount is the input's first path component,
+    // not the input itself: a mount point cannot be renamed or replaced
+    // from inside, while a plain parent directory could be moved aside and
+    // a substitute put in its place. What a step sees under that top-level
+    // directory is the snapshot, that is, the declared inputs only. Sorted,
+    // so the argument vector is the same for the same declaration.
+    let mut tops: Vec<PathBuf> = inputs
+        .paths
+        .iter()
+        .filter_map(|input| {
+            input.components().next().and_then(|c| match c {
+                std::path::Component::Normal(name) => Some(PathBuf::from(name)),
+                _ => None,
+            })
+        })
+        .collect();
+    tops.sort();
+    tops.dedup();
+    for top in tops {
+        let host = inputs.root.join(&top);
         if !host.exists() {
             continue;
         }
-        let inside = manifest.mounts.workspace.join(input);
+        let inside = manifest.mounts.workspace.join(&top);
         args.push("-v".into());
         args.push(format!("{}:{}:ro", host.display(), inside.display()));
     }

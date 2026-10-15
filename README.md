@@ -185,9 +185,11 @@ you discover it during an audit:
   holds another key, does not load at all.
 - **Inputs are held still only inside a capsule, and the receipt says so.**
   A capsule step reads its declared inputs from a snapshot copied and hashed
-  when the receipt's input hash was taken, mounted read-only. The snapshot is
-  outside the writable workspace, so a step cannot reach it through another
-  writable path. The runtime refuses writes from inside, and changes to the
+  when the receipt's input hash was taken, mounted read-only at the input's
+  top-level directory: a mount point cannot be renamed or replaced from
+  inside, and under that directory the step sees the declared inputs only, so
+  outputs cannot be written there. The snapshot is outside the writable
+  workspace, so a step cannot reach it through another writable path. The runtime refuses writes from inside, and changes to the
   original workspace during the step never reach its view. Capsule input paths
   must be relative without `..`, and symbolic links must use relative targets
   covered by the declared inputs. That is enforced, and the `inputs` row of the
@@ -223,7 +225,8 @@ you discover it during an audit:
   revoke` writes to your local trust store; a recipient learns of it when
   they import a bundle you issued afterwards. Nothing pushes that bundle to
   them, and nothing fetches it: trust material moves as a file, by a channel
-  you both chose. What the verifier can say is how current its material is,
+  you both chose. A revocation only ever moves earlier: a later bundle that
+  dates it sooner tightens it, one that dates it later changes nothing. What the verifier can say is how current its material is,
   the bundle its revocations are known up to and whether that bundle has
   expired, and it says so in every verdict. Revocation protects a verifier
   who has refreshed; it does not reach one who has not.

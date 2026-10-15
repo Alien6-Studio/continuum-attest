@@ -372,3 +372,20 @@ fn import_applies_the_same_policy_names() {
         .code(1)
         .stdout(predicates::str::contains("requirement 'recompute' not met"));
 }
+
+/// A requirement this surface cannot establish is refused, and the
+/// refusal still fits the published contract: every requirement name the
+/// verifier knows is in the schema's enumerations.
+#[test]
+fn a_refusal_for_an_image_only_requirement_fits_the_json_contract() {
+    let schema: serde_json::Value =
+        serde_json::from_str(attest::verify::VERDICT_JSON_SCHEMA).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let (dir, receipt) = workspace(true, false);
+    for name in ["sbom", "provenance", "revision"] {
+        let (code, _, record) = verify(dir.path(), &receipt, &["--require", name]);
+        assert_eq!(code, 1);
+        assert_eq!(unmet(&record), vec![name]);
+        assert!(validator.is_valid(&record), "{record}");
+    }
+}

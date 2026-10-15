@@ -1980,6 +1980,168 @@ fn forging_a_hermetic_environment_by_inheriting_the_ambient_one_is_refused() {
     );
 }
 
+/// The input guard drops write bits before a step and puts them back
+/// after. A step that replaced a guarded path with a symbolic link to a
+/// file of its choosing would have the restore chmod that file instead,
+/// through the link, even when the run is then refused: a private key
+/// going from 0600 to 0644 because attest cleaned up. The restore now
+/// touches only the object whose bits it dropped, found by inode.
+#[cfg(unix)]
+#[test]
+fn forging_a_permission_change_on_a_foreign_file_through_the_guard_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = workspace(ONE_STEP);
+    let vault = tempfile::tempdir().unwrap();
+    let secret = vault.path().join("id_ed25519");
+    std::fs::write(&secret, "private\n").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    std::fs::write(dir.path().join("in.txt"), "source\n").unwrap();
+    std::fs::write(
+        dir.path().join("attest.yaml"),
+        format!(
+            "version: \"0.1\"\n\
+             name: swap\n\
+             steps:\n  \
+               build:\n    \
+                 run: \"cp in.txt out.txt && rm -f in.txt && ln -s {} in.txt\"\n    \
+                 inputs: [\"in.txt\"]\n    \
+                 outputs: [\"out.txt\"]\n    \
+                 cache: false\n",
+            secret.display()
+        ),
+    )
+    .unwrap();
+
+    // The run is refused one way or another: the input is not what was
+    // hashed. What this holds is what happened to the file behind the
+    // link while the guard cleaned up.
+    attest()
+        .current_dir(dir.path())
+        .arg("run")
+        .assert()
+        .failure();
+    let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the guard changed a file it never held");
+}
+
+/// A revocation can only move earlier. An issuer who learns the key was
+/// compromised before the date first recorded moves the date back, and
+/// the signatures between the two dates fall with it; a recipient that
+/// kept the first date would go on accepting them.
+#[test]
+fn forging_acceptance_with_a_revocation_dated_too_late_is_refused() {
+    let producer = workspace(ONE_STEP);
+    std::fs::write(producer.path().join("in.txt"), "source\n").unwrap();
+    let generate = |name: &str| {
+        let out = attest()
+            .current_dir(producer.path())
+            .args(["keys", "generate", "--name", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let issuer = generate("release");
+    let stolen = generate("builder");
+    attest()
+        .current_dir(producer.path())
+        .args(["run", "--sign", "--key", &stolen])
+        .assert()
+        .success();
+    let receipt = run_receipt_path(producer.path());
+    let signed_at: chrono::DateTime<chrono::Utc> = {
+        let text = std::fs::read_to_string(&receipt).unwrap();
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        yaml["timestamp"].as_str().unwrap().parse().unwrap()
+    };
+
+    // First the key is revoked, but dated a day after the signature: the
+    // signature predates it and is accepted on the receipt's own word.
+    attest()
+        .current_dir(producer.path())
+        .args(["keys", "revoke", &stolen])
+        .assert()
+        .success();
+    let policy_path = producer.path().join(".attest/trust/trust.toml");
+    let set_revoked_at = |at: chrono::DateTime<chrono::Utc>| {
+        let text = std::fs::read_to_string(&policy_path).unwrap();
+        let dated: Vec<String> = text
+            .lines()
+            .map(|l| {
+                if l.starts_with("revoked_at = ") {
+                    format!("revoked_at = \"{}\"", at.to_rfc3339())
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        std::fs::write(&policy_path, dated.join("\n") + "\n").unwrap();
+    };
+    set_revoked_at(signed_at + chrono::Duration::days(1));
+    let bundle = |file: &str| {
+        let path = producer.path().join(file);
+        attest()
+            .current_dir(producer.path())
+            .args([
+                "trust",
+                "bundle",
+                "--output",
+                path.to_str().unwrap(),
+                "--key",
+                &issuer,
+            ])
+            .assert()
+            .success();
+        path
+    };
+    let first = bundle("first.json");
+
+    let recipient = tempfile::tempdir().unwrap();
+    attest()
+        .current_dir(recipient.path())
+        .arg("init")
+        .assert()
+        .success();
+    let trust = recipient.path().join(".attest/trust");
+    attest()
+        .current_dir(recipient.path())
+        .args([
+            "trust",
+            "import",
+            first.to_str().unwrap(),
+            "--issuer",
+            &issuer,
+        ])
+        .assert()
+        .success();
+    let verify = |expected: i32| {
+        attest()
+            .current_dir(producer.path())
+            .args([
+                "verify",
+                receipt.to_str().unwrap(),
+                "--trust-store",
+                trust.to_str().unwrap(),
+                "--trust-receipt-timestamp",
+            ])
+            .assert()
+            .code(expected);
+    };
+    verify(0);
+
+    // The correction: the key was already compromised the day before the
+    // signature. A newer bundle carries the earlier date.
+    set_revoked_at(signed_at - chrono::Duration::days(1));
+    let second = bundle("second.json");
+    attest()
+        .current_dir(recipient.path())
+        .args(["trust", "import", second.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("earlier"));
+    verify(1);
+}
+
 // ---------------------------------------------------------------------------
 // The cache must not answer a question it was not asked.
 // ---------------------------------------------------------------------------

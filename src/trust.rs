@@ -66,8 +66,9 @@ pub struct TrustBundle {
     pub issued_at: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     /// Orders bundles from one issuer: a later bundle carries a larger
-    /// value. It is the Unix time of `issued_at`; recipients compare it,
-    /// they do not read it as a clock.
+    /// value. It is the Unix time of `issued_at` in nanoseconds, so two
+    /// bundles issued in the same second still order; recipients compare
+    /// it, they do not read it as a clock.
     pub sequence: u64,
     pub keys: Vec<BundledKey>,
     /// The authority this issuer hands over to, if it is stepping down.
@@ -179,7 +180,12 @@ pub fn produce(
         issuer,
         issued_at,
         valid_until: issued_at + valid_for,
-        sequence: u64::try_from(issued_at.timestamp()).context("clock reads before 1970")?,
+        sequence: u64::try_from(
+            issued_at
+                .timestamp_nanos_opt()
+                .context("clock out of the range a sequence can hold")?,
+        )
+        .context("clock reads before 1970")?,
         keys,
         successor,
         signature: None,
@@ -545,6 +551,9 @@ pub struct ImportReport {
     /// A bundle does not un-revoke: the local decision stands, and the
     /// recipient is told.
     pub kept_revoked: Vec<(String, String)>,
+    /// Keys already revoked whose revocation the bundle dates earlier:
+    /// id, name, the new, earlier moment.
+    pub revocation_moved_earlier: Vec<(String, String, DateTime<Utc>)>,
     pub unchanged: usize,
     /// True when the bundle was already the accepted one; nothing was
     /// written.
@@ -732,6 +741,23 @@ pub fn import(
                     report
                         .kept_revoked
                         .push((key.id.clone(), entry.name.clone()));
+                }
+                // Both revoked: the earlier date wins. An issuer who learns
+                // a key was compromised before the date first recorded
+                // moves the revocation back, and every signature between
+                // the two dates has to fall with it; a later date never
+                // reopens a window.
+                (KeyStatus::Revoked, KeyStatus::Revoked)
+                    if key
+                        .revoked_at
+                        .is_some_and(|at| entry.revoked_at.is_none_or(|known| at < known)) =>
+                {
+                    entry.revoked_at = key.revoked_at;
+                    report.revocation_moved_earlier.push((
+                        key.id.clone(),
+                        entry.name.clone(),
+                        key.revoked_at.unwrap_or(DateTime::<Utc>::MIN_UTC),
+                    ));
                 }
                 _ => report.unchanged += 1,
             },

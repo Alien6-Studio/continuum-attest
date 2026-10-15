@@ -182,7 +182,8 @@ pub struct Check {
 /// material look current, and nothing here claims otherwise.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrustMaterial {
-    /// `none` (no bundle on record), `current`, or `expired`.
+    /// `none` (no bundle on record), `current`, `expired`, or
+    /// `not-yet-valid` when the clock reads before the bundle was issued.
     pub state: String,
     pub issuer: Option<String>,
     pub sequence: Option<u64>,
@@ -541,15 +542,30 @@ fn trust_material(
         None => none,
         Some(bundle) => {
             let expired = now > bundle.valid_until;
+            let not_yet = now < bundle.issued_at;
             if expired {
                 warnings.push(format!(
                     "trust material from {} expired at {} (judged by this machine's clock): \
                      revocations issued after bundle {} are unknown here",
                     bundle.issuer.key_id, bundle.valid_until, bundle.sequence
                 ));
+            } else if not_yet {
+                warnings.push(format!(
+                    "trust material from {} was issued at {}, after this machine's clock reads \
+                     {}; one of the two is wrong, and the bundle is not current until the clock \
+                     reaches its issue time",
+                    bundle.issuer.key_id, bundle.issued_at, now
+                ));
             }
             TrustMaterial {
-                state: if expired { "expired" } else { "current" }.to_string(),
+                state: if expired {
+                    "expired"
+                } else if not_yet {
+                    "not-yet-valid"
+                } else {
+                    "current"
+                }
+                .to_string(),
                 issuer: Some(bundle.issuer.key_id),
                 sequence: Some(bundle.sequence),
                 valid_until: Some(bundle.valid_until),

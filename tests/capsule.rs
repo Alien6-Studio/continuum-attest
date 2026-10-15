@@ -627,3 +627,48 @@ fn capsule_root_filesystem_is_read_only() {
         "out\n"
     );
 }
+
+/// A nested input's parent directory is a mount point inside the capsule,
+/// so it cannot be moved aside and replaced. The attack renames `src`,
+/// plants a substitute and reads it; the rename must fail, the step must
+/// fail, and no output may carry the substituted bytes.
+#[test]
+fn capsule_cannot_substitute_a_nested_input_by_renaming_its_parent() {
+    let Some(image) = pulled_busybox_ref() else {
+        eprintln!("skipping capsule_cannot_substitute_a_nested_input_by_renaming_its_parent: no container runtime");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    attest_cmd()
+        .arg("init")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    capsule::init(dir.path(), "frozen", &image).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/in.txt"), "original\n").unwrap();
+    let command = "mv src src.orig && mkdir src && echo substituted > src/in.txt && cat src/in.txt > out.txt && rm -r src && mv src.orig src";
+    let pipeline = format!(
+        "version: \"1.0\"\nname: rename\nsteps:\n  read:\n    run: {}\n    inputs: [\"src/in.txt\"]\n    outputs: [\"out.txt\"]\n    capsule: frozen\n    cache: false\n",
+        serde_json::to_string(command).unwrap()
+    );
+    std::fs::write(dir.path().join("attest.yaml"), pipeline).unwrap();
+    let run = attest_cmd()
+        .arg("run")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        !run.status.success(),
+        "the rename must have failed the step"
+    );
+    assert!(
+        !dir.path().join("out.txt").exists()
+            || std::fs::read_to_string(dir.path().join("out.txt")).unwrap() != "substituted\n",
+        "an output must never carry substituted input bytes"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/in.txt")).unwrap(),
+        "original\n"
+    );
+}

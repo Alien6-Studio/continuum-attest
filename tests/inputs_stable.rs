@@ -297,3 +297,42 @@ fn capsule_refuses_a_snapshot_directory_inside_the_workspace() {
     assert!(!dir.path().join("producer-ran").exists());
     assert!(receipt(dir.path()).is_none());
 }
+
+/// A nested input is mounted at its top-level directory, from the
+/// snapshot: a mount point cannot be renamed or replaced from inside the
+/// capsule, while a plain parent directory could be moved aside and a
+/// substitute put in its place.
+#[test]
+fn a_capsule_mounts_the_top_level_directory_of_a_nested_input() {
+    let dir = workspace("version: \"1.0\"\nname: x\nsteps: {}\n");
+    let manifest = attest::capsule::CapsuleManifest {
+        format: "attest-capsule/v1".to_string(),
+        name: "c".to_string(),
+        image: "registry.example/img@sha256:".to_string() + &"0".repeat(64),
+        entrypoint: None,
+        env: Default::default(),
+        mounts: attest::capsule::CapsuleMounts {
+            workspace: "/ws".into(),
+        },
+        network: attest::capsule::CAPSULE_NETWORK_NONE.to_string(),
+        capsule_hash: None,
+    };
+    let snapshot = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(snapshot.path().join("src/nested")).unwrap();
+    std::fs::write(snapshot.path().join("src/nested/in.txt"), "frozen").unwrap();
+    let args = attest::capsule::run_args(
+        &manifest,
+        dir.path(),
+        &attest::capsule::InputMounts {
+            root: snapshot.path().to_path_buf(),
+            paths: vec!["src/nested/in.txt".into(), "src/nested".into()],
+        },
+        &["true".to_string()],
+    );
+    let joined = args.join(" ");
+    assert!(
+        joined.contains(&format!("{}/src:/ws/src:ro", snapshot.path().display())),
+        "{joined}"
+    );
+    assert!(!joined.contains("/ws/src/nested"), "{joined}");
+}

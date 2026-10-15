@@ -712,3 +712,89 @@ fn trust_material_follows_the_signer_not_the_newest_bundle() {
             "no accepted trust bundle vouches for signing key",
         ));
 }
+
+/// Two bundles issued within the same second still order: the sequence
+/// is the issue time in nanoseconds, and the second import is a refresh,
+/// not a replay.
+#[test]
+fn bundles_issued_in_the_same_second_still_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    init(tmp.path());
+    let key = generate(tmp.path(), "release");
+    let first = bundle_to(tmp.path(), "b1.json", &[]);
+    let second = bundle_to(tmp.path(), "b2.json", &[]);
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    attest()
+        .args(["trust", "import", first.to_str().unwrap(), "--issuer", &key])
+        .current_dir(recipient.path())
+        .assert()
+        .success();
+    attest()
+        .args(["trust", "import", second.to_str().unwrap()])
+        .current_dir(recipient.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("accepted bundle"));
+}
+
+/// A clock that reads before the bundle was issued does not make the
+/// bundle current: the verdict says not-yet-valid, warns, and a policy
+/// that requires current trust material refuses.
+#[test]
+fn a_bundle_issued_after_the_local_clock_is_not_current() {
+    let (producer, key, receipt) = producer_with_signed_receipt();
+    let bundle = bundle_to(producer.path(), "b.json", &["--valid-for", "30"]);
+    let recipient = tempfile::tempdir().unwrap();
+    init(recipient.path());
+    let trust = recipient.path().join(".attest/trust");
+    attest()
+        .args([
+            "trust",
+            "import",
+            bundle.to_str().unwrap(),
+            "--issuer",
+            &key,
+        ])
+        .current_dir(recipient.path())
+        .assert()
+        .success();
+    let accepted = trust.join("bundles").join(format!("{key}.json"));
+    let mut stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&accepted).unwrap()).unwrap();
+    stored["issued_at"] = serde_json::Value::String("2099-01-01T00:00:00Z".into());
+    stored["valid_until"] = serde_json::Value::String("2099-04-01T00:00:00Z".into());
+    std::fs::write(&accepted, serde_json::to_string(&stored).unwrap()).unwrap();
+
+    let out = attest()
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .current_dir(producer.path())
+        .output()
+        .unwrap();
+    let record: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(
+        record["trust_material"]["state"], "not-yet-valid",
+        "{record}"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("one of the two is wrong"));
+    attest()
+        .args([
+            "verify",
+            receipt.to_str().unwrap(),
+            "--trust-store",
+            trust.to_str().unwrap(),
+            "--require",
+            "trust",
+        ])
+        .current_dir(producer.path())
+        .assert()
+        .code(1);
+}

@@ -298,6 +298,24 @@ mutate "capsule snapshots have no writable workspace alias" src/executor/mod.rs 
 assert s.count(old) == 1, "snapshot scope check moved"
 new = s.replace(old, "        if false {")'
 
+mutate "a capsule mounts the top-level directory of a nested input" src/capsule.rs \
+  inputs_stable a_capsule_mounts_the_top_level_directory_of_a_nested_input \
+  'old = "            input.components().next().and_then(|c| match c {"
+assert s.count(old) == 1, "top-level mount derivation moved"
+new = s.replace(old, "            input.components().last().and_then(|c| match c {")'
+
+mutate "the guard restores only the object it held" src/executor/mod.rs \
+  security_invariants forging_a_permission_change_on_a_foreign_file_through_the_guard_is_refused \
+  'old = "                if now.file_type().is_symlink() || now.dev() != dev || now.ino() != ino {"
+assert s.count(old) == 1, "guard restore identity check moved"
+new = s.replace(old, "                if false {")'
+
+mutate "a revocation only moves earlier" src/trust.rs \
+  security_invariants forging_acceptance_with_a_revocation_dated_too_late_is_refused \
+  'old = ".is_some_and(|at| entry.revoked_at.is_none_or(|known| at < known)) =>"
+assert s.count(old) == 1, "earlier-revocation arm moved"
+new = s.replace(old, ".is_some_and(|_| false) =>")'
+
 mutate "a length precedes what it measures" src/hashing.rs \
   encoding_injectivity no_pair_of_label_and_value_can_be_confused_for_another \
   'old = """    hasher.update(label.len().to_string().as_bytes());

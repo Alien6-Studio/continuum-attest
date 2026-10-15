@@ -1577,6 +1577,9 @@ fn handle_trust(action: TrustCommands) -> i32 {
                     for (id, name, at) in &report.revoked {
                         println!("revoked  {id}  {name:<20} at {at}");
                     }
+                    for (id, name, at) in &report.revocation_moved_earlier {
+                        println!("revoked  {id}  {name:<20} earlier, at {at}");
+                    }
                     for (id, name) in &report.kept_revoked {
                         println!(
                             "kept     {id}  {name:<20} revoked here; the bundle lists it as trusted, \

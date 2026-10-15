@@ -299,7 +299,11 @@ mod snapshot_tests {
 /// catches only changes that are still present afterwards. Root is not
 /// bound by permission bits, and the receipt reports this limitation.
 struct InputGuard {
-    restore: Vec<(std::path::PathBuf, u32)>,
+    /// Path, original mode, and the device and inode the mode belongs to.
+    /// Restoring goes back to that object only: a step could have put a
+    /// symbolic link to some other file at the path, and chmod through
+    /// that link would change a file nobody asked attest to touch.
+    restore: Vec<(std::path::PathBuf, u32, u64, u64)>,
     enforced: bool,
 }
 
@@ -342,7 +346,9 @@ impl InputGuard {
                     vec![root]
                 };
                 for path in paths {
-                    let mode = std::fs::symlink_metadata(&path)?.permissions().mode();
+                    use std::os::unix::fs::MetadataExt;
+                    let meta = std::fs::symlink_metadata(&path)?;
+                    let mode = meta.permissions().mode();
                     if mode & 0o222 == 0 {
                         continue;
                     }
@@ -350,7 +356,7 @@ impl InputGuard {
                         .map_err(|e| {
                             anyhow::anyhow!("cannot make input {} read-only: {e}", path.display())
                         })?;
-                    guard.restore.push((path, mode));
+                    guard.restore.push((path, mode, meta.dev(), meta.ino()));
                 }
             }
             Ok(guard)
@@ -374,8 +380,17 @@ impl Drop for InputGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            for (path, mode) in self.restore.drain(..).rev() {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            for (path, mode, dev, ino) in self.restore.drain(..).rev() {
+                // Only the object whose bits were dropped gets them back.
+                // A link now standing at the path, or another file moved
+                // there, is left exactly as the step left it.
+                let Ok(now) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if now.file_type().is_symlink() || now.dev() != dev || now.ino() != ino {
+                    continue;
+                }
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
             }
         }

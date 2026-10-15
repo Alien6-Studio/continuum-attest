@@ -152,7 +152,8 @@
           "enum": [
             "none",
             "current",
-            "expired"
+            "expired",
+            "not-yet-valid"
           ]
         },
         "issuer": {
@@ -221,7 +222,10 @@
               "recompute",
               "linkage",
               "trust",
-              "success"
+              "success",
+              "sbom",
+              "provenance",
+              "revision"
             ]
           }
         },
@@ -242,7 +246,10 @@
                   "recompute",
                   "linkage",
                   "trust",
-                  "success"
+                  "success",
+                  "sbom",
+                  "provenance",
+                  "revision"
                 ]
               },
               "reason": {
