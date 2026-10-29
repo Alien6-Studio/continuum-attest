@@ -71,12 +71,28 @@ impl IdentityPolicy {
 }
 
 /// Values authenticated by the certificate and matched against the policy.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityVerification {
     pub issuer: String,
     pub repository: String,
     pub workflow: String,
     pub revision: String,
+}
+
+/// Roles are kept separate: authorizing a receipt's workflow does not prove
+/// that the same principal signed the artifact itself.
+#[derive(Debug, Clone, Serialize)]
+pub struct IdentityPrincipals {
+    pub evidence_producer: Option<String>,
+    pub workflow: Option<String>,
+    pub artifact_signer: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IdentityOutcome {
+    pub required: Option<IdentityPolicy>,
+    pub verified: Option<IdentityVerification>,
+    pub principals: IdentityPrincipals,
 }
 
 /// Obtain an online keyless signature over the exact receipt bytes. On GitHub,

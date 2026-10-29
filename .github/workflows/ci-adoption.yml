@@ -1,0 +1,145 @@
+name: CI adoption contract
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-outcomes:
+    name: Native outcomes and offline evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --locked
+      - name: Real builds, signatures, verification and TLS publication failures
+        run: |
+          # Only loopback is enabled for the local HTTPS package-registry fixture.
+          sudo unshare --net -- bash -c 'ip link set lo up; exec env ATTEST_REAL_BINARY="$1" PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci-templates/tests -v' bash "$PWD/target/debug/attest"
+      - name: Compile complete-evidence transfer tests before disconnecting
+        run: cargo test --locked --test evidence_completeness --no-run --message-format=json > "$RUNNER_TEMP/evidence-tests.jsonl"
+      - name: Complete evidence transfer and required-proof refusals without any network
+        run: |
+          executable=$(python3 - "$RUNNER_TEMP/evidence-tests.jsonl" <<'PY'
+          import json, sys
+          records = [json.loads(line) for line in open(sys.argv[1])]
+          files = [r['executable'] for r in records if r.get('reason') == 'compiler-artifact'
+                   and r.get('target', {}).get('name') == 'evidence_completeness' and r.get('executable')]
+          assert len(files) == 1, files
+          print(files[0])
+          PY
+          )
+          sudo unshare --net -- "$executable"
+
+  # The published 0.3.0 binary tests installation/upload compatibility only.
+  # real-outcomes and github-identity above/below test the binary under review.
+  github-component:
+    name: GitHub action / ${{ matrix.case }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: accepted, policy: required, command: 'cp source.txt artifact.txt', key: managed, exit: 0, error: '', publication: published}
+          - {case: failed-build, policy: required, command: 'cp source.txt artifact.txt; exit 37', key: managed, exit: 37, error: verification_failed, publication: published}
+          - {case: missing-receipt, policy: required, command: 'true', key: managed, exit: 2, error: receipt_failed, publication: skipped}
+          - {case: failed-signature, policy: required, command: 'cp source.txt artifact.txt', key: missing, exit: 2, error: signing_failed, publication: skipped}
+          - {case: optional-signature, policy: optional, command: 'cp source.txt artifact.txt', key: missing, exit: 0, error: signing_failed, publication: skipped}
+          - {case: 'invalid:required-upload', policy: required, command: 'cp source.txt artifact.txt', key: managed, exit: 2, error: publication_failed, publication: failed}
+          - {case: 'invalid:optional-upload', policy: optional, command: 'cp source.txt artifact.txt', key: managed, exit: 0, error: publication_failed, publication: failed}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Provision public test data and a disposable signing key
+        id: prepare
+        run: |
+          curl --proto '=https' --proto-redir '=https' --location --tlsv1.2 -fsSLo "$RUNNER_TEMP/attest.tar.gz" https://github.com/Alien6-Studio/continuum-attest/releases/download/v0.3.0/attest-v0.3.0-linux-x86_64.tar.gz
+          echo "e47b9079a5afb3943977d75d4915bcaaddf8e37305becfce0e8ee64907c92fba  $RUNNER_TEMP/attest.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/adoption-bin" "$RUNNER_TEMP/adoption-workspace"
+          tar -xzf "$RUNNER_TEMP/attest.tar.gz" -C "$RUNNER_TEMP/adoption-bin" attest
+          cd "$RUNNER_TEMP/adoption-workspace"
+          printf 'public adoption test input\n' > source.txt
+          key=$("$RUNNER_TEMP/adoption-bin/attest" keys generate --name ephemeral-ci-test)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - name: Exercise the actual composite action and artifact upload
+        id: adoption
+        continue-on-error: true
+        uses: ./ci-templates/github/attest-action
+        with:
+          version: '0.3.0'
+          sha256: e47b9079a5afb3943977d75d4915bcaaddf8e37305becfce0e8ee64907c92fba
+          step-name: ${{ matrix.case }}
+          command: ${{ matrix.command }}
+          inputs: source.txt
+          outputs: artifact.txt
+          key: ${{ matrix.key == 'managed' && steps.prepare.outputs.key || 'missing' }}
+          evidence-policy: ${{ matrix.policy }}
+          extra-args: '--workspace "${{ runner.temp }}/adoption-workspace"'
+      - name: Assert the complete machine result, including expected refusals
+        if: ${{ always() }}
+        env:
+          RESULT: ${{ steps.adoption.outputs.status }}
+          ACTION_OUTCOME: ${{ steps.adoption.outcome }}
+          EXPECT_EXIT: ${{ matrix.exit }}
+          EXPECT_ERROR: ${{ matrix.error }}
+          EXPECT_PUBLICATION: ${{ matrix.publication }}
+          EXPECT_POLICY: ${{ matrix.policy }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          result = json.loads(os.environ['RESULT'])
+          expected = int(os.environ['EXPECT_EXIT'])
+          assert result['exit_code'] == expected, result
+          assert (result['error_code'] or '') == os.environ['EXPECT_ERROR'], result
+          assert result['publication_status'] == os.environ['EXPECT_PUBLICATION'], result
+          assert result['evidence_policy'] == os.environ['EXPECT_POLICY'], result
+          assert os.environ['ACTION_OUTCOME'] == ('failure' if expected else 'success'), result
+          assert result['build_exit_code'] == (37 if expected == 37 else 0), result
+          PY
+
+  github-identity:
+    name: Fresh GitHub identity / offline recipient
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --locked
+      - name: Authenticate independent Sigstore trust material
+        env:
+          TUF_ROOT: ${{ runner.temp }}/adoption-tuf
+        run: |
+          curl --proto '=https' --proto-redir '=https' --location --tlsv1.2 -fsSLo "$RUNNER_TEMP/cosign" https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $RUNNER_TEMP/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/cosign"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cosign" initialize
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          roots = list(pathlib.Path(os.environ['TUF_ROOT']).rglob('*trusted_root.json'))
+          assert len(roots) == 1
+          shutil.copyfile(roots[0], pathlib.Path(os.environ['RUNNER_TEMP']) / 'trusted-root.json')
+          PY
+      - name: Produce a fresh native receipt with real GitHub OIDC
+        run: python3 tools/adoption-smoke.py target/debug/attest --identity-phase produce --state "$RUNNER_TEMP/adoption-identity" --trusted-root "$RUNNER_TEMP/trusted-root.json"
+      - name: Accept intact artifacts and reject substitution and unauthorized workflow offline
+        run: sudo unshare --net -- env PATH="$PATH" python3 tools/adoption-smoke.py target/debug/attest --identity-phase verify --state "$RUNNER_TEMP/adoption-identity"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() }}
+        with:
+          name: github-identity-verdicts
+          path: ${{ runner.temp }}/adoption-identity/recipient/*.json

@@ -299,7 +299,7 @@ mod snapshot_tests {
 /// running as the same user could put the bits back itself; the re-hash
 /// catches only changes that are still present afterwards. Root is not
 /// bound by permission bits, and the receipt reports this limitation.
-struct InputGuard {
+pub(crate) struct InputGuard {
     /// Path, original mode, and the device and inode the mode belongs to.
     /// Restoring goes back to that object only: a step could have put a
     /// symbolic link to some other file at the path, and chmod through
@@ -333,7 +333,7 @@ fn restore_input_permissions(
 }
 
 impl InputGuard {
-    fn hold(workspace: &std::path::Path, inputs: &[std::path::PathBuf]) -> Result<Self> {
+    pub(crate) fn hold(workspace: &std::path::Path, inputs: &[std::path::PathBuf]) -> Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -405,7 +405,7 @@ impl InputGuard {
         }
     }
 
-    fn enforced(&self) -> bool {
+    pub(crate) fn enforced(&self) -> bool {
         self.enforced
     }
 }

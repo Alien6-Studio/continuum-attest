@@ -101,11 +101,29 @@ fn export_matches_golden_file() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let golden = std::fs::read(fixtures_dir().join("golden.dsse.json")).expect("golden file");
+    let second = attest_cmd()
+        .args([
+            "export",
+            "--receipt",
+            fixtures_dir().join("receipt.yaml").to_str().unwrap(),
+            "--format",
+            "in-toto",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(second.status.success());
     assert_eq!(
-        output.stdout, golden,
-        "exported envelope differs from golden file"
+        output.stdout, second.stdout,
+        "projection must be deterministic"
     );
+    let projected = decoded_payload(std::str::from_utf8(&output.stdout).unwrap());
+    assert_eq!(
+        projected["predicate"]["attest_evidence"]["artifactBinding"],
+        "unavailable"
+    );
+    assert!(projected["subject"].as_array().unwrap().is_empty());
 }
 
 /// Acceptance criterion 2: export → import passes and preserves the
@@ -160,21 +178,18 @@ fn round_trip_export_import_passes() {
         &std::fs::read_to_string(fixtures_dir().join("receipt.yaml")).expect("receipt"),
     )
     .expect("receipt YAML");
-    let expected = attest::interop::statement_from_receipt(&receipt).expect("statement");
     let statement =
         decoded_payload(&std::fs::read_to_string(&envelope_path).expect("envelope file"));
     assert_eq!(
         statement["predicate"]["runDetails"]["metadata"]["invocationId"]
             .as_str()
             .expect("invocationId"),
-        expected.predicate.run_details.metadata.invocation_id
+        hex::encode(ring::digest::digest(
+            &ring::digest::SHA256,
+            &std::fs::read(fixtures_dir().join("receipt.yaml")).unwrap()
+        ))
     );
-    assert_eq!(
-        statement["subject"][0]["digest"]["blake3"]
-            .as_str()
-            .expect("subject digest"),
-        expected.subject[0].digest.blake3
-    );
+    assert!(statement["subject"].as_array().unwrap().is_empty());
     assert_eq!(
         statement["predicate"]["buildDefinition"]["externalParameters"]["pipelineHash"]
             .as_str()
@@ -429,6 +444,7 @@ fn regenerate_fixtures() {
             allow_unsigned: false,
             key: None,
             workspace: staging.path().to_path_buf(),
+            ..Default::default()
         },
     )
     .expect("export");
@@ -439,4 +455,210 @@ fn regenerate_fixtures() {
         }
         other => panic!("unexpected export outcome: {:?}", other),
     }
+}
+
+#[path = "support/interop_projection.rs"]
+mod projection_security;
+
+use projection_security::{payload, Fixture};
+
+#[test]
+fn projection_preserves_exact_original_and_distinct_signers() {
+    let fixture = Fixture::new();
+    let statement = payload(&fixture.export().unwrap());
+    let original = &statement["predicate"]["attest_evidence"];
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(original["receipt"]["content"].as_str().unwrap())
+            .unwrap(),
+        std::fs::read(&fixture.receipt).unwrap()
+    );
+    assert_eq!(statement["subject"][0]["name"], "artifact.bin");
+    assert_eq!(
+        statement["subject"][0]["digest"]["blake3"],
+        blake3::hash(b"the actual released artifact\n")
+            .to_hex()
+            .as_str()
+    );
+    assert_eq!(
+        statement["predicate"]["runDetails"]["builder"]["id"],
+        attest::interop::UNKNOWN_BUILDER
+    );
+    let verdict = fixture.import(fixture.dir.path(), true);
+    assert!(verdict.passed(), "{verdict:#?}");
+    let details = verdict.interop.unwrap();
+    assert_ne!(details.envelope_signer, details.original_signer);
+    assert!(details.original_verdict.unwrap().passed());
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/interop/slsa-provenance-v1.schema.json"
+    ))
+    .unwrap();
+    assert!(jsonschema::validator_for(&schema)
+        .unwrap()
+        .is_valid(&statement));
+}
+
+#[test]
+#[ignore = "regenerates the public normative example, never needed for verification"]
+fn regenerate_normative_projection_example() {
+    let fixture = Fixture::new();
+    let statement = payload(&fixture.export().unwrap());
+    let output = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs/specifications/attest-pipeline-v2.example.json");
+    std::fs::write(
+        output,
+        format!("{}\n", serde_json::to_string_pretty(&statement).unwrap()),
+    )
+    .unwrap();
+}
+
+/// Integration at the Cosign process boundary. Real certificate/signature
+/// verification remains covered by identity::tests::real_sigstore_verification.
+#[cfg(unix)]
+#[test]
+fn export_and_import_keep_the_approved_workflow_separate_from_signers() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let repository =
+        "https://github.com/sigstore-conformance/extremely-dangerous-public-oidc-beacon";
+    let workflow = format!(
+        "{repository}/.github/workflows/extremely-dangerous-oidc-beacon.yml@refs/heads/main"
+    );
+    let revision = "c7b3dfb335f051e1c86bda4c716fac97df62ad81";
+    let mut receipt: attest::storage::Receipt =
+        serde_yaml::from_slice(&std::fs::read(&fixture.receipt).unwrap()).unwrap();
+    receipt.provenance.as_mut().unwrap().source = Some(attest::storage::SourceInfo {
+        repository: Some(repository.into()),
+        commit: revision.into(),
+        branch: None,
+        tracked_dirty: false,
+    });
+    let store = attest::keys::KeyStore::new(fixture.dir.path());
+    let key = attest::AttestKeypair::from_signing_key(
+        store
+            .select_signing_key(Some(&fixture.original_key))
+            .unwrap()
+            .unwrap(),
+    );
+    receipt.signature = Some(
+        key.sign(
+            attest::storage::receipt_signing_bytes(&receipt)
+                .unwrap()
+                .as_bytes(),
+        ),
+    );
+    std::fs::write(&fixture.receipt, serde_yaml::to_string(&receipt).unwrap()).unwrap();
+    let tools = fixture.dir.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let cosign = tools.join("cosign");
+    std::fs::write(
+        &cosign,
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = version ]; then echo 'GitVersion: v3.1.4'; exit 0; fi
+previous=''
+found=''
+for arg do
+  if [ "$previous" = '--certificate-identity' ]; then
+    [ "$arg" = '{workflow}' ] || exit 1
+    found=yes
+  fi
+  previous="$arg"
+done
+[ "$found" = yes ]
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cosign, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = fixture.dir.path().join("identity-policy.json");
+    let identity_fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/identity");
+    let expected = serde_json::json!({
+        "issuer":"https://token.actions.githubusercontent.com", "repository": repository,
+        "workflow":workflow, "revision": revision,
+        "trusted_root":identity_fixtures.join("trusted-root.json"),
+    });
+    std::fs::write(&policy, serde_json::to_vec(&expected).unwrap()).unwrap();
+    let path =
+        std::env::join_paths([tools.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+    attest_cmd()
+        .env("PATH", &path)
+        .current_dir(fixture.dir.path())
+        .args([
+            "export",
+            "--format",
+            "in-toto",
+            "--receipt",
+            fixture.receipt.to_str().unwrap(),
+            "--key",
+            &fixture.envelope_key,
+            "--identity-policy",
+            policy.to_str().unwrap(),
+            "--identity-bundle",
+            identity_fixtures
+                .join("github.sigstore.json")
+                .to_str()
+                .unwrap(),
+            "--output",
+            fixture.envelope.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let statement = payload(&std::fs::read_to_string(&fixture.envelope).unwrap());
+    assert_eq!(
+        statement["predicate"]["runDetails"]["builder"]["id"],
+        workflow
+    );
+    let output = attest_cmd()
+        .env("PATH", &path)
+        .current_dir(fixture.dir.path())
+        .args([
+            "import",
+            "--format",
+            "in-toto",
+            fixture.envelope.to_str().unwrap(),
+            "--identity-policy",
+            policy.to_str().unwrap(),
+            "--report",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let verdict: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(verdict["identity"]["verified"]["workflow"], workflow);
+    assert_eq!(verdict["identity"]["principals"]["workflow"], workflow);
+    assert!(verdict["identity"]["principals"]["artifact_signer"].is_null());
+    assert_ne!(
+        verdict["interop"]["envelope_signer"],
+        verdict["interop"]["original_signer"]
+    );
+    assert!(verdict["policy"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("identity")));
+    let mut unauthorized = expected;
+    unauthorized["workflow"] = serde_json::json!(
+        "https://github.com/other/repo/.github/workflows/release.yml@refs/heads/main"
+    );
+    std::fs::write(&policy, serde_json::to_vec(&unauthorized).unwrap()).unwrap();
+    attest_cmd()
+        .env("PATH", &path)
+        .current_dir(fixture.dir.path())
+        .args([
+            "import",
+            "--format",
+            "in-toto",
+            fixture.envelope.to_str().unwrap(),
+            "--identity-policy",
+            policy.to_str().unwrap(),
+            "--report",
+            "json",
+        ])
+        .assert()
+        .code(1);
 }

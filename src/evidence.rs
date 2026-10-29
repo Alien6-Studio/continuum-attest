@@ -1,6 +1,7 @@
 //! Release handoff: a signed receipt, its output bytes, and optionally a
 //! Sigstore workflow bundle. Verification never extracts archive paths or
-//! imports trust from the sender. This is separate from the causal archive.
+//! imports trust from the sender. Referenced capsule manifests and causal
+//! events are included without depending on the producer's workspace.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
@@ -12,7 +13,9 @@ use crate::archive::{ArchiveEntry, ArchiveLimits};
 use crate::storage::{ArtifactInfo, Receipt};
 use crate::verify::{Check, CheckStatus, Policy, ReceiptVerdict, Requirement, VerifyOptions};
 
-pub const EVIDENCE_FORMAT: &str = "attest-evidence/v1";
+mod proofs;
+
+pub const EVIDENCE_FORMAT: &str = "attest-evidence/v2";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,7 +39,7 @@ fn safe_path(path: &str) -> Result<()> {
 }
 
 /// Read only the declared file or link, refusing symlinked ancestors.
-fn artifact_bytes(root: &Path, artifact: &ArtifactInfo) -> Result<Vec<u8>> {
+pub(crate) fn artifact_bytes(root: &Path, artifact: &ArtifactInfo) -> Result<Vec<u8>> {
     safe_path(&artifact.path)?;
     let mut current = root.to_path_buf();
     let parts: Vec<_> = Path::new(&artifact.path).components().collect();
@@ -87,7 +90,7 @@ fn artifacts(receipt: &Receipt) -> Result<&[ArtifactInfo]> {
 
 /// Validate the signed inventory against every step's output manifest, not
 /// merely each listed digest: omitting an artifact must also be detected.
-fn inventory(receipt: &Receipt) -> Result<()> {
+pub(crate) fn inventory(receipt: &Receipt) -> Result<()> {
     let mut manifests: BTreeMap<&str, BTreeMap<&str, &ArtifactInfo>> = BTreeMap::new();
     let step_names: BTreeSet<_> = receipt.steps.iter().map(|s| s.name.as_str()).collect();
     ensure!(
@@ -157,6 +160,16 @@ pub fn pack(
     output: &Path,
     identity_bundle: Option<&Path>,
 ) -> Result<()> {
+    pack_with_capsules(receipt_path, workspace, output, identity_bundle, &[])
+}
+
+pub fn pack_with_capsules(
+    receipt_path: &Path,
+    workspace: &Path,
+    output: &Path,
+    identity_bundle: Option<&Path>,
+    capsules: &[std::path::PathBuf],
+) -> Result<()> {
     let bytes =
         crate::verify::read_bounded(receipt_path, crate::verify::MAX_RECEIPT_BYTES, "receipt")?;
     let receipt: Receipt = serde_yaml::from_slice(&bytes).context("invalid receipt")?;
@@ -181,8 +194,8 @@ pub fn pack(
         "invalid receipt signature"
     );
     inventory(&receipt)?;
-    let mut files = BTreeMap::new();
-    let mut size = bytes.len() as u64;
+    let mut files = proofs::collect(&receipt, workspace, capsules)?;
+    let mut size = bytes.len() as u64 + files.values().map(|bytes| bytes.len() as u64).sum::<u64>();
     for artifact in artifacts(&receipt)? {
         let bytes = artifact_bytes(workspace, artifact)?;
         check_digest(artifact, &bytes)?;
@@ -251,6 +264,36 @@ pub fn verify(
     identity_policy: Option<&crate::identity::IdentityPolicy>,
     artifact_root: Option<&Path>,
 ) -> Result<ReceiptVerdict> {
+    verify_with_policy(
+        archive,
+        trust_store,
+        identity_policy,
+        artifact_root,
+        &default_policy(),
+    )
+}
+
+/// Required checks come from the recipient. A sender cannot downgrade
+/// completeness by setting an archive flag or omitting its proof entries.
+pub fn default_policy() -> Policy {
+    Policy {
+        required: vec![
+            Requirement::Signature,
+            Requirement::Success,
+            Requirement::Artifacts,
+            Requirement::Capsule,
+            Requirement::Linkage,
+        ],
+    }
+}
+
+pub fn verify_with_policy(
+    archive: &Path,
+    trust_store: &Path,
+    identity_policy: Option<&crate::identity::IdentityPolicy>,
+    artifact_root: Option<&Path>,
+    policy: &Policy,
+) -> Result<ReceiptVerdict> {
     let entries = crate::archive::read_archive(archive)?;
     let files: BTreeMap<_, _> = entries
         .iter()
@@ -262,7 +305,7 @@ pub fn verify(
             .context("missing evidence manifest")?,
     )?;
     ensure!(
-        manifest.format == EVIDENCE_FORMAT,
+        manifest.format == EVIDENCE_FORMAT || manifest.format == "attest-evidence/v1",
         "unsupported evidence format {}",
         manifest.format
     );
@@ -271,15 +314,27 @@ pub fn verify(
         receipt_bytes.len() as u64 <= crate::verify::MAX_RECEIPT_BYTES,
         "receipt exceeds size limit"
     );
+    let mut required = policy.required.clone();
+    // These are the minimum acceptance contract of a release handoff.
+    for requirement in [
+        Requirement::Signature,
+        Requirement::Success,
+        Requirement::Artifacts,
+    ] {
+        if !required.contains(&requirement) {
+            required.push(requirement);
+        }
+    }
+    if identity_policy.is_some() && !required.contains(&Requirement::Identity) {
+        required.push(Requirement::Identity);
+    }
     let options = VerifyOptions {
         check_signatures: true,
         recompute: false,
         workspace: std::env::current_dir()?,
         trust_store: Some(trust_store.to_path_buf()),
         trust_receipt_timestamp: false,
-        policy: Policy {
-            required: vec![Requirement::Signature, Requirement::Success],
-        },
+        policy: Policy { required },
     };
     let mut verdict = crate::verify::verify_receipt_bytes(
         receipt_bytes,
@@ -296,6 +351,7 @@ pub fn verify(
         if files.contains_key("identity.sigstore.json") {
             expected.insert("identity.sigstore.json".into());
         }
+        expected.extend(proofs::paths(&receipt)?);
         for artifact in artifacts(&receipt)? {
             let path = format!("artifacts/{}", artifact.path);
             let bytes = files
@@ -325,8 +381,20 @@ pub fn verify(
             detail: format!("{error:#}"),
         },
     });
+    if let Ok(receipt) = serde_yaml::from_slice::<Receipt>(receipt_bytes) {
+        verdict.checks.extend(proofs::assess(&receipt, &files));
+    }
+    verdict.identity = Some(crate::identity::IdentityOutcome {
+        required: identity_policy.cloned(),
+        verified: None,
+        principals: crate::identity::IdentityPrincipals {
+            evidence_producer: verdict.signed_by.clone(),
+            workflow: None,
+            artifact_signer: None,
+        },
+    });
     if let Some(policy) = identity_policy {
-        let checked = (|| -> Result<()> {
+        let checked = (|| -> Result<crate::identity::IdentityVerification> {
             let bundle = files
                 .get("identity.sigstore.json")
                 .context("required workflow identity evidence is missing")?;
@@ -339,16 +407,22 @@ pub fn verify(
             let bundle_path = temp.path().join("identity.sigstore.json");
             std::fs::write(&receipt_path, receipt_bytes)?;
             std::fs::write(&bundle_path, bundle)?;
-            crate::identity::verify_receipt_identity(&receipt_path, &bundle_path, policy)?;
-            Ok(())
+            crate::identity::verify_receipt_identity(&receipt_path, &bundle_path, policy)
         })();
         verdict.checks.push(match checked {
-            Ok(()) => Check {
-                name: "identity".into(),
-                status: CheckStatus::Pass,
-                detail: "workflow issuer, repository, workflow and revision match recipient policy"
-                    .into(),
-            },
+            Ok(verified) => {
+                if let Some(identity) = &mut verdict.identity {
+                    identity.principals.workflow = Some(verified.workflow.clone());
+                    identity.verified = Some(verified);
+                }
+                Check {
+                    name: "identity".into(),
+                    status: CheckStatus::Pass,
+                    detail:
+                        "workflow issuer, repository, workflow and revision match recipient policy"
+                            .into(),
+                }
+            }
             Err(error) => Check {
                 name: "identity".into(),
                 status: CheckStatus::Fail,
