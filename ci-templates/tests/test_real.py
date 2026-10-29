@@ -125,6 +125,11 @@ class RealIntegrationTests(unittest.TestCase):
         self.assertEqual(status["error_code"], "signing_failed")
         self.assertEqual(status["publication_status"], "skipped")
 
+    def test_wrapped_signal_preserves_native_shell_exit_semantics(self):
+        status = self.run_case(143, ATTEST_COMMAND="cp source.txt artifact.txt; kill -TERM $$")
+        self.assertEqual(status["build_exit_code"], 143)
+        self.assertEqual(status["build_status"], "failed")
+
     def test_receipt_generation_failure_after_success_is_distinct(self):
         status = self.run_case(2, ATTEST_COMMAND="true")
         self.assertEqual(status["build_exit_code"], 0)
