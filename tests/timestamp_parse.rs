@@ -218,3 +218,92 @@ fn no_corruption_can_change_what_the_verifier_asserts() {
         full.len()
     );
 }
+
+fn sectigo_fixture() -> (Vec<u8>, [u8; 32], Vec<u8>) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/timestamp");
+    let token = std::fs::read(root.join("sectigo-token.der")).unwrap();
+    let imprint = std::fs::read_to_string(root.join("sectigo-fixture-imprint.txt")).unwrap();
+    let imprint = hex::decode(imprint.trim()).unwrap().try_into().unwrap();
+    let issuer = std::fs::read(root.join("sectigo-tsa-ca.der")).unwrap();
+    (token, imprint, issuer)
+}
+
+#[test]
+fn a_real_sha384_token_verifies_against_its_pinned_issuer() {
+    let (token, imprint, issuer) = sectigo_fixture();
+    let verified =
+        verify_token(&token, &imprint, &[issuer]).expect("Sectigo SHA-384 token verifies");
+    assert_eq!(verified.signer, "Sectigo Public Time Stamping Signer R37");
+}
+
+#[test]
+fn a_sha384_token_still_requires_its_exact_issuer_and_imprint() {
+    let (token, imprint, issuer) = sectigo_fixture();
+    assert!(matches!(
+        verify_token(&token, &imprint, &[pinned_ca()]),
+        Err(TimestampError::UntrustedAuthority)
+    ));
+    let mut wrong = imprint;
+    wrong[0] ^= 1;
+    assert!(matches!(
+        verify_token(&token, &wrong, &[issuer]),
+        Err(TimestampError::ImprintMismatch)
+    ));
+}
+
+#[test]
+fn a_sha384_token_cannot_relabel_its_certificate_signature() {
+    let (mut token, imprint, issuer) = sectigo_fixture();
+    let sha384_rsa = [
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c,
+    ];
+    let position = token
+        .windows(sha384_rsa.len())
+        .enumerate()
+        .filter(|(_, bytes)| *bytes == sha384_rsa)
+        .nth(1)
+        .map(|(position, _)| position)
+        .expect("leaf certificate carries inner and outer SHA-384 RSA identifiers");
+    token[position + sha384_rsa.len() - 1] = 0x0b;
+    assert!(matches!(
+        verify_token(&token, &imprint, &[issuer]),
+        Err(TimestampError::Malformed(
+            "certificate signature algorithms differ"
+        ))
+    ));
+}
+
+#[test]
+fn a_sha384_token_cannot_select_an_unknown_digest() {
+    let (mut token, imprint, issuer) = sectigo_fixture();
+    let sha384 = [
+        0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
+    ];
+    let position = token
+        .windows(sha384.len())
+        .position(|w| w == sha384)
+        .unwrap();
+    token[position + sha384.len() - 1] = 0x7f;
+    assert!(matches!(
+        verify_token(&token, &imprint, &[issuer]),
+        Err(TimestampError::Unsupported("CMS digest algorithm"))
+    ));
+}
+
+#[test]
+fn no_sha384_token_corruption_can_change_the_verified_assertion() {
+    let (token, imprint, issuer) = sectigo_fixture();
+    let pinned = [issuer];
+    let truth = verify_token(&token, &imprint, &pinned).unwrap();
+    for position in 0..token.len() {
+        let mut corrupted = token.clone();
+        corrupted[position] ^= 0x80;
+        if let Ok(verified) = verify_token(&corrupted, &imprint, &pinned) {
+            assert_eq!(verified.info, truth.info, "corruption at byte {position}");
+            assert_eq!(
+                verified.signer, truth.signer,
+                "corruption at byte {position}"
+            );
+        }
+    }
+}

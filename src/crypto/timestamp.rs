@@ -65,16 +65,19 @@ const OID_KP_TIMESTAMPING: [u8; 8] = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 
 /// TSTInfo they describe.
 const OID_MESSAGE_DIGEST: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x04];
 
+const OID_SHA256: [u8; 9] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+const OID_SHA384: [u8; 9] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02];
+const OID_RSA_ENCRYPTION: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+const OID_RSA_SHA256: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+const OID_RSA_SHA384: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c];
+
 /// Default timestamp authority. Overridable, and deliberately so: a single
 /// hard-coded authority would be a single point of failure for a property
 /// the whole product rests on.
-/// Plain HTTP, on purpose. DigiCert's authority does not listen on 443
-/// (checked 2026-10-13: connection refused), and RFC 3161 does not need
-/// it to: the token is a CMS signature over the imprint, verified against
-/// a pinned issuing certificate, so nothing on the path can alter it, and
-/// the imprint is a hash of a signature, not a secret. Code scanning
-/// flags the scheme; that finding is accepted for this constant.
-pub const DEFAULT_TSA_URL: &str = "http://timestamp.digicert.com";
+/// HTTPS authenticates and protects the exchange. The resulting token still
+/// needs its independent CMS signature checked against a pinned authority;
+/// transport authentication is not a substitute for offline verification.
+pub const DEFAULT_TSA_URL: &str = "https://timestamp.sectigo.com/rfc3161";
 
 /// Refuse anything larger than this from a timestamp authority. Tokens are a
 /// few kilobytes; a multi-megabyte response is a misbehaving or hostile
@@ -122,6 +125,12 @@ pub enum TimestampError {
         #[source]
         source: reqwest::Error,
     },
+
+    #[error("cannot start the timestamp request worker: {0}")]
+    WorkerStart(#[source] std::io::Error),
+
+    #[error("the timestamp request worker panicked")]
+    WorkerPanicked,
 }
 
 /// Build the DER of a `TimeStampReq` over `digest`.
@@ -191,8 +200,29 @@ pub fn token_from_response(der: &[u8]) -> Result<Vec<u8>, TimestampError> {
     Ok(token.to_vec())
 }
 
-/// Ask `url` to timestamp `digest` and return the token's DER.
+/// Ask an HTTPS `url` to timestamp `digest` and return the token's DER.
+/// Plaintext endpoints and redirects from HTTPS to HTTP are refused.
 pub fn request_token(
+    url: &str,
+    digest: &[u8; 32],
+    timeout: Duration,
+) -> Result<Vec<u8>, TimestampError> {
+    // This API is synchronous, including when a CLI command calls it from
+    // Tokio. reqwest's blocking client must be created and dropped outside
+    // any async runtime; otherwise it panics before returning a result.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("attest-timestamp".to_string())
+                .spawn_scoped(scope, || request_token_blocking(url, digest, timeout))
+                .map_err(TimestampError::WorkerStart)?;
+            worker.join().map_err(|_| TimestampError::WorkerPanicked)?
+        });
+    }
+    request_token_blocking(url, digest, timeout)
+}
+
+fn request_token_blocking(
     url: &str,
     digest: &[u8; 32],
     timeout: Duration,
@@ -203,6 +233,9 @@ pub fn request_token(
     };
 
     let response = reqwest::blocking::Client::builder()
+        // Applied by reqwest to the initial URL and to every redirect target,
+        // before opening a connection. A custom --tsa cannot weaken transport.
+        .https_only(true)
         .timeout(timeout)
         .build()
         .map_err(transport)?
@@ -442,6 +475,22 @@ impl<'a> Der<'a> {
         self.take(TAG_OID)
     }
 
+    /// SHA-2 and PKCS#1 v1.5 identifiers permit absent or NULL parameters.
+    /// Other parameters must not silently change the algorithm we verify.
+    fn algorithm_oid(&mut self) -> Result<&'a [u8], TimestampError> {
+        let mut identifier = self.sequence()?;
+        let oid = identifier.oid()?;
+        if identifier.peek() == Some(0x05) && !identifier.take(0x05)?.is_empty() {
+            return Err(TimestampError::Malformed(
+                "nonempty NULL algorithm parameters",
+            ));
+        }
+        if identifier.peek().is_some() {
+            return Err(TimestampError::Unsupported("algorithm parameters"));
+        }
+        Ok(oid)
+    }
+
     fn set(&mut self) -> Result<Der<'a>, TimestampError> {
         Ok(Der::new(self.take(TAG_SET)?))
     }
@@ -659,6 +708,9 @@ pub struct VerifiedTimestamp {
 /// those attributes is valid; the signing certificate was issued by one of
 /// `pinned_issuers`; and that certificate was valid at the time the token
 /// states.
+/// CMS signatures and certificate signatures support RSA PKCS#1 v1.5 with
+/// SHA-256 or SHA-384, selected explicitly by their algorithm identifiers.
+/// The requested signature imprint remains SHA-256.
 ///
 /// What this deliberately does **not** do is build an X.509 path. There is
 /// no discovery, no intermediate fetching, no name constraints, no CRL or
@@ -680,7 +732,7 @@ pub fn verify_token(
 
     // The attributes must be about the TSTInfo we just read, or the
     // signature would be proving something else.
-    let expected_digest = ring::digest::digest(&ring::digest::SHA256, signed_data.econtent);
+    let expected_digest = signed_data.digest_algorithm.digest(signed_data.econtent);
     if signed_data.message_digest_attr != expected_digest.as_ref() {
         return Err(TimestampError::Malformed(
             "signed attributes do not describe this TSTInfo",
@@ -700,7 +752,13 @@ pub fn verify_token(
         .map(|der| Certificate::parse(der))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .find(|cert| rsa_pkcs1_sha256_verify(cert.public_key, &signed_bytes, signed_data.signature))
+        .find(|cert| {
+            signed_data.digest_algorithm.verify_rsa(
+                cert.public_key,
+                &signed_bytes,
+                signed_data.signature,
+            )
+        })
         .ok_or(TimestampError::BadSignature)?;
 
     // Holding a certificate from the pinned issuer is not the same as being
@@ -713,7 +771,11 @@ pub fn verify_token(
     let issued_by_pinned = pinned_issuers.iter().any(|issuer_der| {
         Certificate::parse(issuer_der).is_ok_and(|issuer| {
             issuer.subject == signer.issuer
-                && rsa_pkcs1_sha256_verify(issuer.public_key, signer.tbs, signer.signature)
+                && signer.signature_algorithm.verify_rsa(
+                    issuer.public_key,
+                    signer.tbs,
+                    signer.signature,
+                )
         })
     });
     if !issued_by_pinned {
@@ -732,13 +794,48 @@ pub fn verify_token(
     })
 }
 
-fn rsa_pkcs1_sha256_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
-    ring::signature::UnparsedPublicKey::new(
-        &ring::signature::RSA_PKCS1_2048_8192_SHA256,
-        public_key,
-    )
-    .verify(message, signature)
-    .is_ok()
+/// CMS and the issuing certificate select their own SHA-2 algorithm. The
+/// timestamp's message imprint remains SHA-256 regardless of that choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sha2Algorithm {
+    Sha256,
+    Sha384,
+}
+
+impl Sha2Algorithm {
+    fn from_digest_oid(oid: &[u8]) -> Result<Self, TimestampError> {
+        match oid {
+            oid if oid == OID_SHA256 => Ok(Self::Sha256),
+            oid if oid == OID_SHA384 => Ok(Self::Sha384),
+            _ => Err(TimestampError::Unsupported("CMS digest algorithm")),
+        }
+    }
+
+    fn from_rsa_oid(oid: &[u8]) -> Result<Self, TimestampError> {
+        match oid {
+            oid if oid == OID_RSA_SHA256 => Ok(Self::Sha256),
+            oid if oid == OID_RSA_SHA384 => Ok(Self::Sha384),
+            _ => Err(TimestampError::Unsupported("RSA signature algorithm")),
+        }
+    }
+
+    fn digest(self, bytes: &[u8]) -> ring::digest::Digest {
+        let algorithm = match self {
+            Self::Sha256 => &ring::digest::SHA256,
+            Self::Sha384 => &ring::digest::SHA384,
+        };
+        ring::digest::digest(algorithm, bytes)
+    }
+
+    fn verify_rsa(self, public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+        let algorithm = match self {
+            Self::Sha256 => &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            Self::Sha384 => &ring::signature::RSA_PKCS1_2048_8192_SHA384,
+        };
+        ring::signature::UnparsedPublicKey::new(algorithm, public_key)
+            .verify(message, signature)
+            .is_ok()
+    }
 }
 
 /// Re-encode an implicitly tagged `[0]` attribute block as the `SET OF` the
@@ -769,6 +866,7 @@ struct SignedDataParts<'a> {
     signed_attrs: &'a [u8],
     message_digest_attr: &'a [u8],
     signature: &'a [u8],
+    digest_algorithm: Sha2Algorithm,
 }
 
 impl<'a> SignedDataParts<'a> {
@@ -780,7 +878,11 @@ impl<'a> SignedDataParts<'a> {
         let mut signed_data = Der::new(content_info.take(TAG_CONTEXT_0)?).sequence()?;
 
         let _version = signed_data.integer()?;
-        let _digest_algorithms = signed_data.set()?;
+        let mut algorithms = signed_data.set()?;
+        let mut declared_digests = Vec::new();
+        while algorithms.peek().is_some() {
+            declared_digests.push(Sha2Algorithm::from_digest_oid(algorithms.algorithm_oid()?)?);
+        }
 
         let mut encap = signed_data.sequence()?;
         if encap.oid()? != OID_TST_INFO {
@@ -805,12 +907,24 @@ impl<'a> SignedDataParts<'a> {
         let mut signer = signer_infos.sequence()?;
         let _version = signer.integer()?;
         signer.skip_any()?; // sid: issuerAndSerialNumber or [0] keyIdentifier
-        let _digest_algorithm = signer.sequence()?;
+        let digest_algorithm = Sha2Algorithm::from_digest_oid(signer.algorithm_oid()?)?;
+        if !declared_digests.contains(&digest_algorithm) {
+            return Err(TimestampError::Malformed(
+                "CMS digest algorithm is not declared",
+            ));
+        }
 
         let signed_attrs = signer.take(TAG_CONTEXT_0)?;
         let message_digest_attr = message_digest_attribute(signed_attrs)?;
 
-        let _signature_algorithm = signer.sequence()?;
+        let signature_oid = signer.algorithm_oid()?;
+        if signature_oid != OID_RSA_ENCRYPTION
+            && Sha2Algorithm::from_rsa_oid(signature_oid)? != digest_algorithm
+        {
+            return Err(TimestampError::Malformed(
+                "CMS signature and digest algorithms differ",
+            ));
+        }
         let signature = signer.octet_string()?;
 
         Ok(Self {
@@ -819,6 +933,7 @@ impl<'a> SignedDataParts<'a> {
             signed_attrs,
             message_digest_attr,
             signature,
+            digest_algorithm,
         })
     }
 }
@@ -851,6 +966,7 @@ struct Certificate<'a> {
     /// `RSAPublicKey` that `ring` expects.
     public_key: &'a [u8],
     signature: &'a [u8],
+    signature_algorithm: Sha2Algorithm,
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
     /// Whether the certificate carries the extended key usage RFC 3161 §2.3
@@ -868,7 +984,8 @@ impl<'a> Certificate<'a> {
     fn parse(der: &'a [u8]) -> Result<Self, TimestampError> {
         let mut certificate = Der::new(der).sequence()?;
         let tbs = certificate.element(TAG_SEQUENCE)?;
-        let _signature_algorithm = certificate.sequence()?;
+        let signature_oid = certificate.algorithm_oid()?;
+        let signature_algorithm = Sha2Algorithm::from_rsa_oid(signature_oid)?;
         let signature = certificate.bit_string()?;
 
         let mut fields = Der::new(tbs).sequence()?;
@@ -876,7 +993,11 @@ impl<'a> Certificate<'a> {
             fields.take(TAG_CONTEXT_0)?; // version, absent in v1
         }
         fields.skip_any()?; // serialNumber
-        fields.skip_any()?; // signature algorithm
+        if fields.algorithm_oid()? != signature_oid {
+            return Err(TimestampError::Malformed(
+                "certificate signature algorithms differ",
+            ));
+        }
         let issuer = fields.element(TAG_SEQUENCE)?;
 
         let mut validity = fields.sequence()?;
@@ -941,6 +1062,7 @@ impl<'a> Certificate<'a> {
             subject,
             public_key,
             signature,
+            signature_algorithm,
             not_before,
             not_after,
             allows_timestamping,

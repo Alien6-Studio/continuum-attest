@@ -71,7 +71,7 @@ enum Commands {
         #[arg(
             long,
             value_name = "URL",
-            help = "Timestamp authority to use with --timestamp"
+            help = "HTTPS timestamp authority to use with --timestamp"
         )]
         tsa: Option<String>,
 
@@ -142,7 +142,7 @@ enum Commands {
         #[arg(
             long,
             value_name = "URL",
-            help = "Timestamp authority to use with --timestamp"
+            help = "HTTPS timestamp authority to use with --timestamp"
         )]
         tsa: Option<String>,
 

@@ -36,7 +36,7 @@ jobs:
       - id: list
         run: |
           cat >> "$GITHUB_OUTPUT" <<'EOF'
-          matrix=[{"os":"ubuntu-latest","name":"linux-x86_64"},{"os":"ubuntu-24.04-arm","name":"linux-aarch64"},{"os":"macos-15-intel","name":"macos-x86_64"},{"os":"macos-14","name":"macos-aarch64"}]
+          matrix=[{"os":"ubuntu-latest","name":"linux-x86_64"},{"os":"ubuntu-24.04-arm","name":"linux-aarch64"},{"os":"macos-15-intel","name":"macos-x86_64"},{"os":"macos-15","name":"macos-aarch64"}]
           EOF
 
   gates:
@@ -364,8 +364,13 @@ jobs:
           ATTEST_KEYS_DIR: ${{ runner.temp }}/keys
         run: |
           set -euo pipefail
+          # Sectigo asks scripted signers to leave at least 15 seconds
+          # between timestamp requests. The first receipt needs no delay.
+          timestamp_delay=0
           for receipt in .attest/receipts/*.yaml; do
+            sleep "$timestamp_delay"
             ./target/release/attest sign "$receipt" --key "${{ vars.ATTEST_KEY_ID }}" --timestamp
+            timestamp_delay=15
           done
           ./target/release/attest verify .attest/receipts/*.yaml \
             --trust-store .attest/trust --require signature,timestamp --format text
