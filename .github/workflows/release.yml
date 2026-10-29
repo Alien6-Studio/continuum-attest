@@ -162,6 +162,9 @@ jobs:
     name: 0.3 offline adoption
     needs: [gates, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Fresh native receipt bound to this GitHub workflow.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -181,6 +184,43 @@ jobs:
 
       - name: Verify GitHub and GitLab failure handling
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci-templates/tests -v
+
+      - name: Install pinned Cosign and independently authenticate the Sigstore root
+        env:
+          TUF_ROOT: ${{ runner.temp }}/adoption-tuf
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/adoption-tools"
+          curl --proto '=https' --tlsv1.2 -fsSLo "$RUNNER_TEMP/adoption-tools/cosign" \
+            https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          printf '%s  %s\n' \
+            424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa \
+            "$RUNNER_TEMP/adoption-tools/cosign" | sha256sum --check -
+          chmod +x "$RUNNER_TEMP/adoption-tools/cosign"
+          # The embedded Sigstore TUF root authenticates fresh target metadata;
+          # no trust material is accepted from the producer's evidence bundle.
+          "$RUNNER_TEMP/adoption-tools/cosign" initialize
+          python3 - "$TUF_ROOT" "$RUNNER_TEMP/adoption-trusted-root.json" <<'PY'
+          from pathlib import Path
+          import shutil, sys
+          roots = list(Path(sys.argv[1]).rglob("*trusted_root.json"))
+          if len(roots) != 1:
+              raise SystemExit("expected one TUF-authenticated Sigstore trusted root")
+          shutil.copyfile(roots[0], sys.argv[2])
+          PY
+
+      - name: Bind a fresh native receipt to the actual GitHub workflow
+        run: |
+          export PATH="$RUNNER_TEMP/adoption-tools:$PATH"
+          python3 tools/adoption-smoke.py "$RUNNER_TEMP/adoption-verifier/attest" \
+            --identity-phase produce --state "$RUNNER_TEMP/adoption-identity" \
+            --source "$GITHUB_WORKSPACE" --trusted-root "$RUNNER_TEMP/adoption-trusted-root.json"
+
+      - name: Verify that GitHub workflow identity offline and reject substitutions
+        run: |
+          sudo unshare --net -- env PATH="$RUNNER_TEMP/adoption-tools:$PATH" \
+            python3 tools/adoption-smoke.py "$RUNNER_TEMP/adoption-verifier/attest" \
+            --identity-phase verify --state "$RUNNER_TEMP/adoption-identity"
 
       - name: Verify a release handoff and rejection cases with no network
         run: |

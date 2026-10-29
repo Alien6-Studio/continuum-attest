@@ -6,9 +6,9 @@ The next steps focus on the handoff between those two people: what to trust,
 what to distribute, and what a successful verification actually establishes.
 
 This is the proposed development order for the open-source CLI and formats.
-0.1 and 0.2 are released. 0.3 is the current release candidate; the
-release workflow checks its adoption path before publication. Later
-milestones describe planned work.
+0.1 and 0.2 established the foundation and shareable trust. 0.3 adds
+adoption in existing CI; the release workflow checks the handoff before
+publication. Later milestones describe planned work.
 There are no target dates. Each milestone has a completion criterion, and
 security fixes can ship independently of this sequence.
 
