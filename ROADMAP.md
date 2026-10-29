@@ -6,7 +6,9 @@ The next steps focus on the handoff between those two people: what to trust,
 what to distribute, and what a successful verification actually establishes.
 
 This is the proposed development order for the open-source CLI and formats.
-0.1 and 0.2 are released; later milestones describe planned work.
+0.1 and 0.2 are released. 0.3 is the current release candidate; the
+release workflow checks its adoption path before publication. Later
+milestones describe planned work.
 There are no target dates. Each milestone has a completion criterion, and
 security fixes can ship independently of this sequence.
 
@@ -56,6 +58,15 @@ states the trust information's validity window; it cannot claim knowledge of
 revocations issued after its last update.
 
 ## 0.3 — Ember Sky: adoption in existing CI
+
+Implementation: [CI adoption guide](docs/ci-adoption.md), GitHub composite
+action, GitLab component, `run --wrap --report`, `identity sign`, and
+`evidence pack|verify`. Local tests exercise artifact substitution, missing
+trust, unauthorized workflow evidence and build/evidence failure separation.
+The release workflow checks the local-key producer/recipient handoff with
+network access disabled for verification. Real GitHub and GitLab provider
+jobs, followed by verification on a network-disabled machine, remain the
+acceptance criterion for the complete workflow-identity adoption scenario.
 
 **Outcome:** a team can attest one existing build job and hand its output to
 a recipient without migrating its pipeline to Attest.

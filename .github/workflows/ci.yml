@@ -18,6 +18,68 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci-integrations:
+    name: CI integration wrappers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test GitHub and GitLab orchestration
+        run: python3 -m unittest discover -s ci-templates/tests -v
+
+  offline-identity:
+    name: Sigstore verification without network
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
+        with:
+          toolchain: "1.98.1"
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install checksum-pinned cosign 3.1.4
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSLo "$RUNNER_TEMP/cosign" \
+            https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          printf '%s  %s\n' \
+            424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa \
+            "$RUNNER_TEMP/cosign" | sha256sum --check -
+          chmod +x "$RUNNER_TEMP/cosign"
+
+      - name: Compile the fixture verifier before disconnecting
+        run: |
+          cargo test --lib --locked --no-run --message-format=json \
+            > "$RUNNER_TEMP/attest-test-artifacts.jsonl"
+
+      # Cargo and all downloads run as the ordinary runner user above. Only
+      # the already-built test and cosign enter a fresh network namespace.
+      - name: Verify authentic and tampered Sigstore evidence with no network
+        run: |
+          set -euo pipefail
+          ATTEST_LIB_TEST=$(python3 - "$RUNNER_TEMP/attest-test-artifacts.jsonl" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as source:
+              records = [json.loads(line) for line in source]
+          executables = [record["executable"] for record in records
+                         if record.get("reason") == "compiler-artifact"
+                         and record.get("target", {}).get("name") == "attest"
+                         and "lib" in record.get("target", {}).get("kind", [])
+                         and record.get("profile", {}).get("test")
+                         and record.get("executable")]
+          if len(executables) != 1:
+              raise SystemExit("expected exactly one compiled attest library test binary")
+          print(executables[0])
+          PY
+          )
+          # A renamed or accidentally disabled test must not pass by running zero tests.
+          "$ATTEST_LIB_TEST" --list --ignored --exact identity::tests::real_sigstore_verification \
+            | python3 -c 'import sys; expected = "identity::tests::real_sigstore_verification: test"; assert expected in sys.stdin.read().splitlines(), "offline identity test is missing"'
+          sudo unshare --net -- env ATTEST_TEST_COSIGN="$RUNNER_TEMP/cosign" \
+            "$ATTEST_LIB_TEST" --ignored --exact identity::tests::real_sigstore_verification
+
   # rustfmt and clippy are pinned, deliberately. Both change their output
   # and gain lints between Rust releases, so a floating toolchain lets an
   # unrelated release turn an unchanged commit red. Tests still run on
@@ -36,7 +98,7 @@ jobs:
           toolchain: "1.98.1"
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -68,7 +130,7 @@ jobs:
         with:
           toolchain: "1.98.1"
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: The invariants pass on the real code
         run: |
@@ -108,7 +170,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Test
         run: cargo test --locked
@@ -134,7 +196,7 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - run: cargo check --all-targets --locked
 
@@ -152,7 +214,7 @@ jobs:
         with:
           toolchain: "1.98.1"
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Package and install from the package
         run: |
@@ -187,7 +249,7 @@ jobs:
           toolchain: "1.98.1"
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Build attest
         run: cargo build --release --locked

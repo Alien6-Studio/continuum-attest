@@ -26,7 +26,7 @@
 //! executions would then share every hash a receipt records.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -66,11 +66,64 @@ pub struct WrapOptions {
     pub workspace: PathBuf,
 }
 
-/// Execute `command` verbatim and append a single-step receipt.
-///
-/// Returns the process exit code per the module-level contract; `Err`
-/// means an operational failure (exit 2 in the CLI).
+/// Independent build and evidence outcomes for CI consumers.
+#[derive(Debug, serde::Serialize)]
+pub struct WrapReport {
+    pub build_exit_code: Option<i32>,
+    pub evidence_status: String,
+    pub receipt: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
+/// Execute `command` in the workspace and append a single-step receipt.
+/// Operational errors return `Err` unless a failed build's code takes priority.
 pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
+    run_wrap_with_report(command, options, None)
+}
+
+/// Report build and evidence outcomes separately. Once the build has failed,
+/// no signing, storage or reporting failure may replace its exit code.
+pub fn run_wrap_with_report(
+    command: &[String],
+    options: &WrapOptions,
+    report_path: Option<&Path>,
+) -> Result<i32> {
+    let mut report = WrapReport {
+        build_exit_code: None,
+        evidence_status: "failed".into(),
+        receipt: None,
+        error: None,
+    };
+    let result = run_wrap_inner(command, options, &mut report);
+    if let Err(error) = &result {
+        report.error = Some(format!("{error:#}"));
+    }
+    if report.evidence_status == "failed" && report.error.is_none() {
+        report.error = Some("attestation incomplete; see stderr".into());
+    }
+    let reporting = report_path.map_or(Ok(()), |path| {
+        let bytes = serde_json::to_vec_pretty(&report)?;
+        std::fs::write(path, bytes)
+            .with_context(|| format!("cannot write wrap report {}", path.display()))
+    });
+    if let Some(code) = report.build_exit_code.filter(|code| *code != 0) {
+        if let Err(error) = result {
+            eprintln!("error: attestation failed: {error:#}");
+        }
+        if let Err(error) = reporting {
+            eprintln!("error: attestation report failed: {error:#}");
+        }
+        return Ok(code);
+    }
+    reporting?;
+    result
+}
+
+fn run_wrap_inner(
+    command: &[String],
+    options: &WrapOptions,
+    report: &mut WrapReport,
+) -> Result<i32> {
     let (first, rest) = match command.split_first() {
         Some(split) => split,
         None => anyhow::bail!("--wrap requires a command after `--`"),
@@ -104,6 +157,7 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
         Ok(hash) => hash,
         Err(err) => {
             eprintln!("error: attestation failed: {err}");
+            report.error = Some(err.to_string());
             return Ok(1);
         }
     };
@@ -111,6 +165,7 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
     let started = Instant::now();
     let mut child = match Command::new(first)
         .args(rest)
+        .current_dir(&options.workspace)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -120,6 +175,7 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
         Err(err) => {
             // Shell convention: 127 = command not found / not executable.
             eprintln!("attest: failed to execute '{first}': {err}");
+            report.error = Some(format!("failed to execute command: {err}"));
             return Ok(127);
         }
     };
@@ -138,6 +194,7 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
         .unwrap_or_else(|_| String::from("[capture failed]"));
     let duration_secs = started.elapsed().as_secs();
     let exit_code = exit_code_of(&status);
+    report.build_exit_code = Some(exit_code);
 
     let (output_hash, artifacts) = match crate::hashing::outputs_with_artifacts(
         &options.workspace,
@@ -147,12 +204,14 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
         Ok(hash) => hash,
         Err(err) if exit_code == 0 => {
             eprintln!("error: attestation failed: {err}");
+            report.error = Some(err.to_string());
             return Ok(1);
         }
         Err(err) => {
             // The command already failed; report its exit code and do not
             // fabricate output hashes for artifacts that were never built.
             eprintln!("warning: attestation incomplete: {err}; no receipt written");
+            report.error = Some(err.to_string());
             return Ok(exit_code);
         }
     };
@@ -220,6 +279,8 @@ pub fn run_wrap(command: &[String], options: &WrapOptions) -> Result<i32> {
     )?;
     // stderr, not stdout: the wrapped command owns stdout in wrap mode.
     eprintln!("attest: receipt written to {}", receipt_path.display());
+    report.receipt = Some(receipt_path);
+    report.evidence_status = "produced".into();
 
     Ok(exit_code)
 }

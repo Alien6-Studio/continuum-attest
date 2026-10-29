@@ -1,81 +1,52 @@
-# 0.2.0 — Paper Moon
+# 0.3.0 — Ember Sky
 
-attest runs your build, hashes every declared input and output, and writes a
-signed receipt of what happened. Anyone holding that receipt can re-derive the
-hashes from your source and confirm the artifact came from the code claimed —
-without trusting your CI, your runner, or us.
+Attest can wrap one existing GitHub or GitLab build job and transfer its
+signed receipt together with the declared output bytes for offline checking.
+The native receipt format and canonical signing bytes are unchanged; existing
+0.1 and 0.2 receipts remain verifiable.
 
-0.2 is about trust that can be shared, and about a verdict that says what it
-checked. The receipt format is unchanged: every 0.1 receipt still verifies,
-signature included, and the test suite holds the parser to that.
+## Adopt in an existing build
 
-## Install
-
-```console
-cargo install continuum-attest --locked
-```
-
-Or take a binary from the assets below. Linux and macOS, x86-64 and arm64,
-each tested in CI before it ships. The command is `attest`; the crate is
-`continuum-attest` because `attest` was already taken. Building from source
-needs Rust 1.89.
-
-## Trust you can hand over
+The GitHub composite action and GitLab CI component declare inputs, outputs
+and the build command, sign the resulting receipt, and publish evidence.
+`attest run --wrap --report FILE` reports the build exit code separately from
+evidence production and names the exact receipt. A failed build retains its
+exit code even if signing, storage or reporting also fails.
 
 ```console
-attest trust bundle --output trust.json --key <issuer>      # producer
-attest trust import trust.json --issuer <issuer-key-id>     # recipient, once
-attest trust refresh trust-2.json                           # recipient, later
+attest evidence pack receipt.yaml --output release.attest.tar.zst
+attest evidence verify release.attest.tar.zst --trust-store /trusted/keys
 ```
 
-A bundle carries the keys an issuer vouches for and the ones it revoked, each
-revocation dated, a validity window, a sequence number and the issuer's
-signature. `attest trust show` tells a recipient who issued it, until when,
-and whether a byte of it changed. The first bundle is accepted only against an
-issuer the recipient names through another channel; an older bundle than the
-one accepted is a replay and is refused; a bundle from an authority the
-recipient revoked is refused whatever it says; an authority stepping down
-names its successor in its own signed bundle. Every verdict states the bundle
-its revocations are current up to, judged by the local clock and saying so.
+Verification requires a trusted receipt signature, successful execution and
+artifact bytes matching the signed output inventory. `--artifact-root DIR`
+also checks files delivered outside the archive. Archives never supply their
+own trust anchors and verification does not extract untrusted paths.
 
-## A verdict that says what it checked
+## Require an approved workflow
 
-```console
-attest verify receipt.yaml --require signature,timestamp,recompute
-```
+`attest identity sign receipt.yaml --bundle identity.sigstore.json` uses
+Cosign 3 to bind a CI-issued identity to the exact receipt bytes. Include the
+bundle with `evidence pack --identity-bundle identity.sigstore.json`, then
+verify with `--identity-policy policy.json`. The recipient pins the issuer,
+repository, complete workflow identity, source revision and a local Sigstore
+trusted root. Verification uses Cosign's offline proof checks and authenticated
+Fulcio certificate claims; environment variables alone establish no identity.
+The local Ed25519 signature is still required, and disconnected producers can
+continue using it without Sigstore.
 
-A check that did not run is reported as skipped and never satisfies a
-requirement. `--require` names what must be established; the refusal names
-what was not, in text and in the JSON contract, which gains `policy`,
-`execution` and `trust_material`. The same names apply to archives
-(`linkage`), to `attest import`, and to `attest image verify`, which now runs
-under one policy: keyless needs a pinned identity and issuer, a required
-revision with no evidence fails, and a verification that checks nothing does
-not run.
+The [CI adoption guide](https://github.com/Alien6-Studio/continuum-attest/blob/v__VERSION__/docs/ci-adoption.md) contains both producer/recipient
+examples and rejection cases. Workflow identity authenticates the signer and
+source claims, not the integrity of the runner. Signing publishes metadata and
+the receipt digest to Sigstore's transparency log; it does not publish the
+receipt body or artifact bytes.
 
-## What the receipt now says about the build
+## Dependencies
 
-- An `isolation` block names each control — network, filesystem,
-  capabilities, environment, memory, open files, cpu, timeout, inputs — as
-  enforced, not enforced or not available on that platform. `--verify` is
-  process isolation: resource limits, not network or filesystem control, and
-  the receipt says so.
-- Declared inputs are unwritable while a step runs, by permission bits
-  locally and by read-only mounts in a capsule; what the bits cannot prevent,
-  the re-hash after the step detects.
-- The signing key is loaded only after the last step has exited. `attest
-  sign` signs receipts in a process that ran no project command, and
-  `ATTEST_KEYS_DIR` keeps private keys outside the workspace.
-
-## Fail closed
-
-- A key status outside `trusted`/`revoked` does not load; a `.pub` file is
-  presence, not trust; a revoked key cannot sign new evidence.
-- `--timestamp` without `--sign`, `--key` without `--sign`, and every other
-  option that could not take effect are refused before anything runs.
-- Archives are refused before parsing past 64 MiB on disk, 512 MiB unpacked,
-  10 000 entries or 64 MiB per entry; receipts and envelopes past 16 MiB
-  likewise, with `resource-limit` set apart from a verdict in JSON.
+Dependabot updates include jsonschema, zstd, libc, rust-cache and the crates.io
+authentication action. Patch updates to tokio, rustls-webpki and webpki-roots
+resolve RUSTSEC-2026-0386, RUSTSEC-2026-0382 and RUSTSEC-2026-0381. The MSRV
+remains Rust 1.89.
 
 ## Check this release before you run it
 
@@ -83,12 +54,12 @@ not run.
 shasum -a 256 -c SHA256SUMS
 
 cosign verify-blob \
-  --bundle attest-__VERSION__-<target>.tar.gz.sigstore.json \
+  --bundle attest-v__VERSION__-<target>.tar.gz.sigstore.json \
   --certificate-identity-regexp '^https://github\.com/Alien6-Studio/continuum-attest/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  attest-__VERSION__-<target>.tar.gz
+  attest-v__VERSION__-<target>.tar.gz
 
-gh attestation verify attest-__VERSION__-<target>.tar.gz \
+gh attestation verify attest-v__VERSION__-<target>.tar.gz \
   --repo Alien6-Studio/continuum-attest
 ```
 
@@ -108,6 +79,6 @@ have refused the release on any difference.
 - **Matching hashes prove consistency with signed claims.** They do not prove
   the runner was uncompromised; the isolation block says what was controlled.
 
-[ROADMAP.md](ROADMAP.md) says what comes next and in which order.
+[ROADMAP.md](https://github.com/Alien6-Studio/continuum-attest/blob/v__VERSION__/ROADMAP.md) says what comes next and in which order.
 
 Apache-2.0.
