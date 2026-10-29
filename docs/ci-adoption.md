@@ -6,14 +6,14 @@ that receipt. Set `identity: true` to also attach a Sigstore bundle identifying
 the CI workflow. A recipient verifies the resulting `release.attest.tar.zst`
 on another machine with its own trust configuration and no network.
 
-The producer needs Attest 0.3, Linux x86_64, Python 3, Bash, curl, tar and
+The producer needs Attest 0.3.1 or newer, Linux x86_64, Python 3, Bash, curl, tar and
 sha256sum. Identity signing also needs a separately installed, pinned Cosign 3
 binary and network access to its signing services. The integrations download
 the Attest tarball and install it only after checking the supplied SHA-256.
-Before the 0.3 release assets
-exist, use the CLI sequence below with a locally built binary or a verified
-internal release mirror. Replace every `<...>` placeholder before using an
-example.
+Use the version and digest of the release you audited, or a verified internal
+release mirror. Replace every `<...>` placeholder before using an example.
+Use 0.3.1 or newer for the complete-evidence contract and separate
+`attest timestamp` phase.
 
 Identity signing publishes the receipt digest and signing metadata to the
 configured Sigstore transparency log. It does not upload the source tree or
@@ -68,7 +68,7 @@ jobs:
       - id: attest
         uses: Alien6-Studio/continuum-attest/ci-templates/github/attest-action@<AUDITED_COMMIT_SHA>
         with:
-          version: '0.3.0'
+          version: '0.3.1'
           sha256: '<PINNED_LINUX_X86_64_TARBALL_SHA256>'
           step-name: build
           inputs: 'src Cargo.toml Cargo.lock'
@@ -93,9 +93,12 @@ The `inputs` and `outputs` strings are whitespace-separated literal paths;
 they do not expand globs and cannot name a path containing whitespace. Use the
 CLI's repeatable `--input`/`--output` flags directly for those paths. `extra-args`
 accepts shell-style quoting for additional flags but does not evaluate shell
-code. A `--workspace` argument is also forwarded to packaging so it reads
-the same output files. Signing is enabled by the integration itself; do not repeat `--sign`,
-`--report` or the command separator there.
+code. `evidence-policy` is `required` by default; use `optional` to report
+evidence failures without failing a successful build. `trust-store` and
+`identity-policy` select independent verification policy. A `--workspace` argument is also forwarded to packaging so it reads
+the same output files. The integration signs after the command exits; do not repeat `--sign`,
+`--key`, `--report` or the command separator there. With `--timestamp`, the
+existing signature is timestamped separately, without re-signing it.
 
 ## GitLab producer
 
@@ -127,7 +130,7 @@ include:
       job-name: release-build
       stage: build
       image: '<YOUR_BUILD_IMAGE>@sha256:<PINNED_IMAGE_DIGEST>'
-      version: '0.3.0'
+      version: '0.3.1'
       sha256: '<PINNED_LINUX_X86_64_TARBALL_SHA256>'
       step-name: build
       inputs: 'src Cargo.toml Cargo.lock'
@@ -143,13 +146,30 @@ release-build:
       aud: sigstore
 ```
 
-The job publishes only `.attest-ci/$CI_JOB_ID/` with `artifacts: when: always`. Its
-`release.attest.tar.zst` has the same format as the GitHub output. The component
-uses GitLab's unique job ID, including a new ID for a retried job, so an
-installation or build failure cannot publish an earlier job's directory.
-It also refuses an existing directory for the current invocation. Exclude
-`.attest-ci/` from restored caches. The component embeds its runner, so it does not
-fetch an unpinned helper script at runtime.
+The component uploads `release.attest.tar.zst` to the project's Generic
+Package Registry using the job's short-lived `CI_JOB_TOKEN`. The package is
+`attest-evidence/<CI_JOB_ID>` by default; `package-name` changes its name.
+The archive includes the actual output artifacts and their evidence together.
+Publication is `published` only after the API confirms HTTP 201. Transfers
+require the CI server's HTTPS origin, validate its TLS certificate, and refuse
+redirects so the job token cannot be forwarded elsewhere. The project must
+have the Package Registry enabled and permit this job token to upload.
+[GitLab documents this upload contract](https://docs.gitlab.com/user/packages/generic_packages/).
+
+The final `status.json` contains the package URL and actual publication result.
+The job also exports scalar outcomes through `status.env` as a GitLab dotenv
+report (`ATTEST_BUILD_EXIT_CODE`, `ATTEST_EVIDENCE_STATUS`,
+`ATTEST_VERIFICATION_STATUS`, `ATTEST_PUBLICATION_STATUS`,
+`ATTEST_EVIDENCE_POLICY`, `ATTEST_ERROR_CODE`, `ATTEST_PUBLICATION_URL`,
+`ATTEST_EXIT_CODE`). Downstream jobs can use these variables without parsing
+console output. The runner's later job-artifact upload retains diagnostics;
+it is separate from the confirmed package publication.
+
+Only `.attest-ci/$CI_JOB_ID/` is selected for diagnostic artifacts. GitLab
+assigns a new job ID on retry, so an installation or build failure cannot
+publish an earlier job's directory. Exclude `.attest-ci/` from caches. The
+component embeds the same tested runner as GitHub and fetches no helper script
+at runtime.
 
 The provided identity-signing command uses Cosign's default signing services,
 which support particular issuers including GitLab.com. It does not expose
@@ -293,33 +313,87 @@ attest evidence verify delivery/release.attest.tar.zst \
 
 ## Build, evidence and publication outcomes
 
-`attest run --wrap --report FILE` writes a machine-readable report carrying
-`build_exit_code`, `evidence_status`, `receipt` and `error`. The integrations
-read the exact receipt path from that invocation; they never select the newest
-receipt from a directory of previous runs.
+Both integrations expose the same final JSON status. GitHub provides it as
+`steps.attest.outputs.status`, with individual build/evidence/verification/
+publication outputs. GitLab retains it as `.attest-ci/$CI_JOB_ID/status.json`
+and exports the scalar fields as dotenv variables. Its publication URL points
+to the archive whose upload was confirmed by the package API.
 
-The integration's `status.json` adds the wrapper exit code, packaged evidence
-path, overall exit code and publication status. `evidence_status: produced`
-means an archive was created; a failed build may still have valid diagnostic
-evidence, which release verification rejects for lack of success.
+| Field | Meaning |
+|---|---|
+| `build_status`, `build_exit_code` | `not_started`, `succeeded` or `failed`, plus the original exit code |
+| `evidence_policy` | `required` (default) or `optional` |
+| `evidence_status` | `produced` means the archive exists; `failed` means production failed |
+| `verification_status` | `passed`, `failed` or `skipped`; produced evidence can fail verification |
+| `publication_status` | `published`, `failed` or `skipped`; `pending` exists only before transfer completion |
+| `error_code`, `failure_stage`, `errors` | Stable phase code and all failures, separate from the build result |
+| `receipt`, `evidence`, `publication_url` | Exact paths/URL from this invocation, never an older receipt |
+| `exit_code` | Integration outcome after applying the policy below |
 
-| Situation | Integration exit code | Evidence status |
-|---|---:|---|
-| Build succeeds and evidence is produced | 0 before publication | `produced` |
-| Build exits N | N, even if evidence also fails | `produced` or `failed` |
-| Build succeeds but signing, identity or packaging fails | 2 | `failed` |
-| Build never starts | Nonzero operational/wrapper code | `failed` |
-| GitHub upload fails after a successful build | 2 | Production status unchanged |
+The phases are `receipt`, `signing`, `timestamping`, `identity`, `packaging`,
+`verification`, `publication` and `reporting`. Failure codes use the suffix
+`_failed`, for example `signing_failed` or `publication_failed`.
+`verification.json` retains the verifier's detailed machine-readable checks.
+A missing receipt has `evidence_status: failed` and verification `skipped`;
+a produced archive refused by the verifier has evidence `produced` and
+verification `failed`.
 
-Publication happens after evidence production. The uploaded `status.json`
-therefore records `publication_status: pending`; it cannot certify its own
-future transfer. GitHub exposes the actual result through the action output
-`publication-status` (`published`, `failed`, `skipped`) and its upload step.
-GitLab performs artifact transfer after the script exits, so its runner's
-artifact-upload result is authoritative. Check that result as well as the
-script status; the component does not claim to turn a post-script GitLab
-upload failure into a particular build exit code. Cancellation can prevent
-publication on either platform.
+| Situation | Final exit code |
+|---|---:|
+| Build exits N | N, even when later evidence or publication also fails |
+| Build succeeds; required evidence fails in any phase | 2 |
+| Build succeeds; optional evidence fails | 0, with failed status and explicit error code |
+| Build and all requested evidence operations succeed | 0 |
+| Build never starts, or machine reporting cannot be written | Nonzero operational code |
+
+Signing, identity, timestamps and archive verification are required when
+requested under `evidence-policy: required`; disabling an operation differs
+from allowing its failure. `optional` never converts a failed build into a
+successful one. A failed build may publish diagnostic evidence, but its
+verification cannot establish successful execution.
+
+GitHub's artifact upload completes before its finalizer reports publication.
+The archive's earlier status snapshot may say `pending`; consume the action's
+final JSON output. GitLab's package upload completes inside the runner before
+its final JSON/dotenv report is written. Neither provider claims successful
+publication before an upload acknowledgement. Cancellation or an unavailable
+reporting channel can prevent delivery of a report; the CI job's failure must
+then remain visible.
+
+## Executable acceptance and refusal examples
+
+[CI adoption contract](../.github/workflows/ci-adoption.yml) runs the actual
+GitHub composite action and upload service for acceptance, a failed build,
+missing receipt, required/optional signing failures and required/optional
+publication failures. The publication refusal uses an invalid artifact name;
+it asserts the real upload failure, the final JSON reason and exit code.
+This includes a successful build whose required signature cannot be completed.
+
+The same workflow tests the current native binary against a local HTTPS
+implementation of GitLab's package-upload contract: successful transfer,
+HTTP failure, redirect refusal, invalid TLS, optional failures, receipt
+failure, signing failure and verification failure. The fixture does not claim
+to be a hosted GitLab identity test. Complete-evidence tests and the recipient
+for fresh GitHub OIDC evidence run in network namespaces with no network.
+The unauthorized-workflow case retains valid signatures and artifact bytes;
+only recipient authorization changes, and the identity-specific refusal is
+asserted alongside a passing receipt signature.
+
+For the GitLab identity example, copy
+[`ci-templates/gitlab/acceptance.yml`](../ci-templates/gitlab/acceptance.yml)
+to `.gitlab-ci.yml` in a GitLab.com checkout of this repository. It declares
+its ID token locally, obtains a fresh native workflow-bound receipt, removes
+the producer, and runs the identical offline recipient assertions. It needs a
+Linux x86_64 runner that permits network namespaces. An inability to disconnect
+fails the job; it never retries verification online. A private GitLab issuer
+also needs a compatible private Sigstore service and independently supplied
+trust roots; merely having a private GitLab server does not provide that
+signing service. The GitLab hosted run remains a separate acceptance task;
+local contract tests and the GitHub run do not substitute for it.
+
+To recompute a wrapped receipt's command identity and declared input/output
+hashes without `attest.yaml`, see [Wrapped recomputation](wrapped-recomputation.md).
+Deliver the input source files as well as the archive's output artifacts.
 
 ## Equivalent commands without a CI template
 
@@ -344,8 +418,10 @@ those bytes until the archive has been produced.
 
 ## Evidence format and resource bounds
 
-The `attest-evidence/v1` package is a deterministic tar.zst containing the
-receipt, declared artifact payloads and optional workflow bundle. Verification
+The `attest-evidence/v2` package is a deterministic tar.zst containing the
+receipt, declared artifact payloads, referenced capsule manifests and causal
+events, and optional workflow bundle. See the normative
+[evidence format and completeness rules](evidence-format.md). Verification
 reads entries without extracting them onto the filesystem. Symlink artifacts
 store the UTF-8 bytes of the link target path; those bytes establish the recorded link, not
 the contents of an undeclared file it might point to. The receipt remains the

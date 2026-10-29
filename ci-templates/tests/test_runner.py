@@ -26,14 +26,16 @@ if args[0] == "run":
     path.write_text("current receipt\n")
     report = {
         "build_exit_code": code,
-        "evidence_status": "failed" if os.environ.get("SIGN_FAILURE") else "produced",
-        "receipt": None if os.environ.get("SIGN_FAILURE") else str(path),
-        "error": "signing failed" if os.environ.get("SIGN_FAILURE") else None,
+        "evidence_status": "failed" if os.environ.get("RECEIPT_FAILURE") else "produced",
+        "receipt": None if os.environ.get("RECEIPT_FAILURE") else str(path),
+        "error": "receipt failed" if os.environ.get("RECEIPT_FAILURE") else None,
     }
     pathlib.Path(args[args.index("--report") + 1]).write_text(json.dumps(report))
     if os.environ.get("STATUS_REPORT_FAILURE"):
         pathlib.Path(args[args.index("--report") + 1]).parent.joinpath("status.json").mkdir()
-    sys.exit(2 if os.environ.get("SIGN_FAILURE") else code)
+    sys.exit(code or (2 if os.environ.get("RECEIPT_FAILURE") else 0))
+elif args[0] in ("sign", "timestamp"):
+    sys.exit(2 if os.environ.get("SIGN_FAILURE") else 0)
 elif args[:2] == ["identity", "sign"]:
     if os.environ.get("IDENTITY_FAILURE"):
         sys.exit(2)
@@ -44,6 +46,10 @@ elif args[:2] == ["evidence", "pack"]:
     if "--identity-bundle" in args:
         assert pathlib.Path(args[args.index("--identity-bundle") + 1]).is_file()
     pathlib.Path(args[args.index("--output") + 1]).write_bytes(b"evidence archive")
+elif args[:2] == ["evidence", "verify"]:
+    failed = bool(os.environ.get("VERIFY_FAILURE"))
+    print(json.dumps({"verdict": "fail" if failed else "pass", "checks": []}))
+    sys.exit(1 if failed else 0)
 else:
     sys.exit(2)
 '''
@@ -91,10 +97,11 @@ class RunnerTests(unittest.TestCase):
         status = self.status()
         self.assertEqual(status["build_exit_code"], 0)
         self.assertEqual(status["evidence_status"], "produced")
-        self.assertEqual(status["publication_status"], "pending")
+        self.assertEqual(status["publication_status"], "skipped")
         self.assertTrue(Path(status["evidence"]).is_file())
-        self.assertIn("--sign", self.invocations()[0])
-        self.assertEqual(self.invocations()[1][2], ".attest/receipts/current.yaml")
+        self.assertNotIn("--sign", self.invocations()[0])
+        self.assertEqual(self.invocations()[1][0], "sign")
+        self.assertEqual(self.invocations()[2][2], ".attest/receipts/current.yaml")
 
     def test_build_failure_wins_over_pack_failure(self):
         result = self.invoke(ATTEST_COMMAND="exit 37", PACK_FAILURE="1")
@@ -104,8 +111,8 @@ class RunnerTests(unittest.TestCase):
     def test_build_failure_wins_over_sign_failure(self):
         result = self.invoke(ATTEST_COMMAND="exit 39", SIGN_FAILURE="1")
         self.assertEqual(result.returncode, 39, result.stderr)
-        self.assertEqual(self.status()["error"], "signing failed")
-        self.assertEqual(len(self.invocations()), 1)
+        self.assertEqual(self.status()["error_code"], "signing_failed")
+        self.assertEqual(len(self.invocations()), 2)
 
     def test_failed_build_can_still_publish_diagnostic_evidence(self):
         result = self.invoke(ATTEST_COMMAND="exit 41")
@@ -121,15 +128,15 @@ class RunnerTests(unittest.TestCase):
         result = self.invoke(ATTEST_IDENTITY="true", IDENTITY_FAILURE="1")
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(self.status()["evidence_status"], "failed")
-        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.invocations()), 3)
         self.assertFalse((self.root / ".attest-ci/release.attest.tar.zst").exists())
 
     def test_gitlab_identity_uses_token_environment_name(self):
         result = self.invoke(ATTEST_IDENTITY="true", ATTEST_IDENTITY_TOKEN_ENV="ATTEST_CI_ID_TOKEN")
         self.assertEqual(result.returncode, 0, result.stderr)
-        identity = self.invocations()[1]
+        identity = self.invocations()[2]
         self.assertEqual(identity[-2:], ["--identity-token-env", "ATTEST_CI_ID_TOKEN"])
-        self.assertIn("--identity-bundle", self.invocations()[2])
+        self.assertIn("--identity-bundle", self.invocations()[3])
 
     def test_missing_report_cannot_select_an_old_receipt(self):
         stale = self.root / ".attest/receipts/old.yaml"
@@ -195,7 +202,7 @@ class RunnerTests(unittest.TestCase):
     def test_subdirectory_workspace_is_forwarded_to_pack(self):
         result = self.invoke(ATTEST_EXTRA_ARGS='--workspace="project with spaces"')
         self.assertEqual(result.returncode, 0, result.stderr)
-        pack = self.invocations()[1]
+        pack = self.invocations()[2]
         self.assertEqual(pack[pack.index("--workspace") + 1], "project with spaces")
 
     def test_gitlab_artifact_path_cannot_publish_a_previous_job(self):
@@ -217,6 +224,20 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn(stale, published)
         self.assertFalse(any(path.name == "release.attest.tar.zst" for path in published))
 
+    def test_optional_signing_failure_is_visible(self):
+        result = self.invoke(ATTEST_EVIDENCE_POLICY="optional", SIGN_FAILURE="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.status()["error_code"], "signing_failed")
+        self.assertEqual(self.status()["evidence_policy"], "optional")
+
+    def test_receipt_failure_and_later_verification_failure_are_distinct(self):
+        result = self.invoke(VERIFY_FAILURE="1")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(self.status()["evidence_status"], "produced")
+        self.assertEqual(self.status()["verification_status"], "failed")
+        self.assertEqual(self.status()["error_code"], "verification_failed")
+
+
 
 class ComponentTests(unittest.TestCase):
     def test_gitlab_requires_identity_token_from_consuming_project(self):
@@ -233,21 +254,34 @@ class ComponentTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
-    def finalize(self, code, outcome, build_outcome="success", output_failure=False):
-        action = (ROOT / "ci-templates/github/attest-action/action.yml").read_text()
-        block = action.rsplit("      run: |\n", 1)[1]
-        script = "\n".join(line[8:] for line in block.splitlines())
+    def finalize(self, code, outcome, build_outcome="success", output_failure=False, policy="required"):
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "output"
+            directory = Path(temporary)
+            output = directory / "output"
             if output_failure:
                 output.mkdir()
+            if code != "":
+                status = {
+                    "build_exit_code": int(code), "wrapper_exit_code": int(code),
+                    "build_status": "failed" if int(code) else "succeeded",
+                    "evidence_policy": policy, "evidence_status": "produced",
+                    "verification_status": "passed", "publication_status": "pending",
+                    "publication_url": None, "receipt": "receipt.yaml", "evidence": "archive.zst",
+                    "failure_stage": None, "error_code": None, "error": None, "errors": [],
+                }
+                (directory / "status.json").write_text(json.dumps(status))
             result = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True,
-                env={**os.environ, "GITHUB_OUTPUT": str(output),
-                     "ATTEST_EXIT_CODE": str(code), "ATTEST_PUBLISH_OUTCOME": outcome,
-                     "ATTEST_BUILD_OUTCOME": build_outcome},
+                [sys.executable, str(RUNNER), "--finalize", "--directory", str(directory),
+                 "--publication-outcome", outcome, "--build-outcome", build_outcome],
+                capture_output=True, text=True,
+                env={**os.environ, "GITHUB_OUTPUT": str(output), "ATTEST_EXIT_CODE": str(code)},
             )
-            return result.returncode, output.read_text() if output.is_file() else None
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.is_file() else {}
+            publication = values.get("publication-status")
+            return result.returncode, "publication-status=" + publication + "\n" if publication else None
+
+    def test_optional_upload_failure_is_visible_without_failing_build(self):
+        self.assertEqual(self.finalize(0, "failure", policy="optional"), (0, "publication-status=failed\n"))
 
     def test_upload_failure_fails_a_successful_build(self):
         code, output = self.finalize(0, "failure")
@@ -266,7 +300,7 @@ class PublicationTests(unittest.TestCase):
     def test_final_step_leaves_failed_build_outcome_when_outputs_are_unavailable(self):
         self.assertEqual(
             self.finalize("", "skipped", build_outcome="failure"),
-            (0, "publication-status=skipped\n"),
+            (0, None),
         )
 
     def test_publication_output_error_does_not_mask_build_failure(self):

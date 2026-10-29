@@ -1,4 +1,5 @@
-//! Minimal signed execution context. No environment dump or command arguments.
+//! Signed execution context. No environment dump; wrapped commands carry
+//! their exact argument vector so recipients can recompute their identity.
 use crate::storage::{CiInfo, ExecutionProvenance, SourceInfo, StepProvenance};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -93,6 +94,7 @@ pub fn collect(
         ci,
         steps: vec![],
         artifacts: vec![],
+        execution: Some(crate::storage::ExecutionDescriptor::Native),
     }
 }
 pub fn step(

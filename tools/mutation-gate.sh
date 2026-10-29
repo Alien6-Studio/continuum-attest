@@ -432,13 +432,137 @@ mutate "release evidence: required workflow identity cannot be skipped" src/evid
   security_invariants release_handoff::forging_release_acceptance_by_removing_required_workflow_identity_is_refused \
   'old = "    if let Some(policy) = identity_policy {"
 assert s.count(old) == 1, "required identity check moved"
-new = s.replace(old, "    if let Some(policy) = identity_policy.filter(|_| false) {")'
+new = s.replace(old, "    if let Some(policy) = identity_policy.filter(|_| false) {")
+required = "if identity_policy.is_some() && !required.contains(&Requirement::Identity) {"
+assert s.count(required) == 1, "identity requirement moved"
+new = new.replace(required, "if false {")'
 
 mutate "release evidence: a failed build cannot authorize a release" src/evidence.rs \
   security_invariants release_handoff::forging_release_acceptance_from_a_failed_build_is_refused \
-  'old = "required: vec![Requirement::Signature, Requirement::Success],"
-assert s.count(old) == 1, "release execution policy moved"
-new = s.replace(old, "required: vec![Requirement::Signature],")'
+  'old = "Requirement::Success,"
+assert s.count(old) == 2, "release execution policy moved"
+new = s.replace(old, "")'
+
+mutate "release evidence: recipient requires capsule completeness" src/evidence.rs \
+  security_invariants forging_completeness_by_omitting_a_required_capsule_is_refused \
+  'old = "Requirement::Capsule,"
+assert s.count(old) == 1, "capsule completeness policy moved"
+new = s.replace(old, "")'
+
+mutate "release evidence: capsule manifest matches signed reference" src/evidence/proofs.rs \
+  security_invariants forging_capsule_material_behind_a_signed_hash_is_refused \
+  'old = "manifest.compute_hash()? == hash && manifest.capsule_hash.as_deref() == Some(hash),"
+assert s.count(old) == 1, "capsule hash check moved"
+new = s.replace(old, "true || (manifest.compute_hash()? == hash && manifest.capsule_hash.as_deref() == Some(hash)),")'
+
+mutate "release evidence: recipient requires causal completeness" src/evidence.rs \
+  security_invariants forging_completeness_by_omitting_required_causal_events_is_refused \
+  'old = "Requirement::Linkage,"
+assert s.count(old) == 1, "causal completeness policy moved"
+new = s.replace(old, "")'
+
+mutate "release evidence: packaged causal proofs are authenticated" src/evidence/proofs.rs \
+  security_invariants substituting_self_consistent_causal_events_behind_a_signed_root_is_refused \
+  'old = "result(\"chain-linkage\", causal)"
+assert s.count(old) == 1, "causal proof verification moved"
+new = s.replace(old, "result(\"chain-linkage\", Ok(None))")'
+
+mutate "wrapped recompute: changed inputs" src/verify.rs \
+  security_invariants wrapped_security::forging_wrapped_inputs_after_transfer_is_refused \
+  'old = "input_hash == step.input_hash"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "wrapped recompute: changed outputs" src/verify.rs \
+  security_invariants wrapped_security::forging_wrapped_outputs_after_transfer_is_refused \
+  'old = "output_hash == step.output_hash"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "wrapped recompute: command identity" src/verify.rs \
+  security_invariants wrapped_security::forging_wrapped_command_identity_is_refused \
+  'old = "crate::wrap::pipeline_hash(&canonical) == receipt.pipeline_hash"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "wrapped recompute: command hash" src/verify.rs \
+  security_invariants wrapped_security::forging_wrapped_command_hash_is_refused \
+  'old = "blake3::hash(canonical.as_bytes()).to_hex().as_str() == declaration.command_hash"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "wrapped recompute: matching declarations" src/verify.rs \
+  security_invariants wrapped_security::forging_wrapped_declarations_for_another_step_is_refused \
+  'old = "declaration.name == step.name && declaration.needs.is_empty()"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "wrapped recompute: no capsule claim" src/verify.rs \
+  security_invariants wrapped_security::forging_a_capsule_claim_for_wrapped_execution_is_refused \
+  'old = "step.capsule_hash.is_none()"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "wrapped inputs: check after execution" src/wrap.rs \
+  security_invariants wrapped_security::forging_wrapped_inputs_during_execution_is_refused \
+  'old = "if inputs_after != input_hash {"
+assert s.count(old) == 1
+new = s.replace(old, "if false {")'
+
+mutate "wrapped inputs: permission guard" src/wrap.rs \
+  security_invariants wrapped_security::forging_a_wrapped_input_through_a_plain_transient_write_is_refused \
+  'old = "crate::executor::InputGuard::hold(&options.workspace, &options.inputs)?"
+assert s.count(old) == 1
+new = s.replace(old, "crate::executor::InputGuard::hold(&options.workspace, &[])?")'
+
+mutate "release evidence: reject unauthenticated causal metadata" src/evidence/proofs.rs \
+  security_invariants forging_causal_claims_in_unsigned_metadata_is_refused \
+  'old = "event.metadata.is_empty(),"
+assert s.count(old) == 1
+new = s.replace(old, "true || event.metadata.is_empty(),")'
+
+mutate "release evidence: reject unauthenticated proof extensions" src/evidence/proofs.rs \
+  security_invariants forging_proof_claims_in_unknown_extensions_is_refused \
+  'old = "object.keys().all(|key| allowed.contains(&key.as_str())),"
+assert s.count(old) == 1
+new = s.replace(old, "true || object.keys().all(|key| allowed.contains(&key.as_str())),")'
+
+mutate "interop projection: original signer remains independently trusted" src/interop.rs \
+  security_invariants interop_projection::resigning_cannot_authorize_the_untrusted_original_receipt \
+  'old = "let passed = original.passed();"
+assert s.count(old) == 1
+new = s.replace(old, "let passed = true;")'
+
+mutate "interop projection: original signer identity cannot be relabelled" src/interop.rs \
+  security_invariants interop_projection::a_resigned_projection_cannot_relabel_the_original_signer \
+  'old = "evidence.original_signer == receipt.signer_public_key"
+assert s.count(old) == 1
+new = s.replace(old, "true")'
+
+mutate "interop projection: subjects remain bound to original receipt" src/interop.rs \
+  security_invariants interop_projection::a_valid_dsse_signature_cannot_substitute_projection_subjects \
+  'old = "serde_json::to_value(statement)? == serde_json::to_value(expected)?"
+assert s.count(old) == 1
+new = s.replace(old, "{ let _ = expected; true }")'
+
+mutate "interop projection: reject unchecked extra signatures" src/interop.rs \
+  security_invariants interop_projection::a_projection_cannot_hide_an_unchecked_second_dsse_signature \
+  'old = "if envelope.signatures.len() > 1 {"
+assert s.count(old) == 1
+new = s.replace(old, "if false && envelope.signatures.len() > 1 {")'
+
+mutate "interop projection: export reads actual artifact bytes" src/interop.rs \
+  security_invariants interop_projection::exporting_substituted_artifact_bytes_is_refused \
+  'old = "blake3::hash(&bytes).to_hex().as_str() == artifact.digest"
+assert s.count(old) == 2
+new = s.replace(old, "{ let _ = &bytes; true }", 1)'
+
+mutate "interop projection: import checks delivered artifact bytes" src/interop.rs \
+  security_invariants interop_projection::importing_substituted_artifact_bytes_is_refused \
+  'old = "blake3::hash(&bytes).to_hex().as_str() == artifact.digest"
+assert s.count(old) == 2
+index = s.rfind(old)
+new = s[:index] + s[index:].replace(old, "{ let _ = &bytes; true }", 1)'
 
 # Deliberately not mutated: the archive's per-event id check is diagnostics,
 # not an independent protection. Since the chain root covers each event's full

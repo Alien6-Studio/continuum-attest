@@ -60,10 +60,16 @@ pub enum Requirement {
     Provenance,
     /// Provenance bound to the expected source revision (images only).
     Revision,
+    /// Workflow claims authenticated against the recipient's identity policy.
+    Identity,
+    /// Declared artifact bytes match the signed inventory.
+    Artifacts,
+    /// Every referenced capsule has its matching manifest.
+    Capsule,
 }
 
 impl Requirement {
-    pub const ALL: [Requirement; 9] = [
+    pub const ALL: [Requirement; 12] = [
         Requirement::Signature,
         Requirement::Timestamp,
         Requirement::Recompute,
@@ -73,6 +79,9 @@ impl Requirement {
         Requirement::Sbom,
         Requirement::Provenance,
         Requirement::Revision,
+        Requirement::Identity,
+        Requirement::Artifacts,
+        Requirement::Capsule,
     ];
 
     pub fn name(self) -> &'static str {
@@ -86,6 +95,9 @@ impl Requirement {
             Requirement::Sbom => "sbom",
             Requirement::Provenance => "provenance",
             Requirement::Revision => "revision",
+            Requirement::Identity => "identity",
+            Requirement::Artifacts => "artifacts",
+            Requirement::Capsule => "capsule",
         }
     }
 }
@@ -199,6 +211,10 @@ pub struct ReceiptVerdict {
     pub verdict: String,
     pub checks: Vec<Check>,
     pub signed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<crate::identity::IdentityOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interop: Option<crate::interop::InteropOutcome>,
     /// Non-fatal notices (e.g. a signature by a key revoked after signing).
     pub warnings: Vec<String>,
     /// Present for receipt-file verdicts; absent on surfaces that have no
@@ -232,6 +248,9 @@ pub fn apply_policy(verdict: &mut ReceiptVerdict, policy: &Policy) {
             | Requirement::Recompute
             | Requirement::Sbom
             | Requirement::Provenance
+            | Requirement::Identity
+            | Requirement::Artifacts
+            | Requirement::Capsule
             | Requirement::Revision => check_reason(verdict, requirement.name()),
             Requirement::Linkage => check_reason(verdict, "chain-linkage"),
             Requirement::Trust => match &verdict.trust_material {
@@ -393,6 +412,8 @@ pub fn verify_receipt_bytes(
                 verdict: "fail".to_string(),
                 checks,
                 signed_by,
+                identity: None,
+                interop: None,
                 warnings,
                 trust_material: None,
                 execution: Some(ExecutionOutcome {
@@ -477,6 +498,8 @@ pub fn verify_receipt_bytes(
         verdict: verdict.to_string(),
         checks,
         signed_by,
+        identity: None,
+        interop: None,
         warnings,
         trust_material: Some(trust_material),
         execution: Some(execution),
@@ -942,6 +965,99 @@ fn key_trust_status(opts: &VerifyOptions, public_key_hex: &str) -> Result<KeyTru
 /// Recompute every step's input hash from the workspace's pipeline
 /// declaration and compare byte-for-byte with the receipt.
 fn recompute_check(receipt: &Receipt, workspace: &Path) -> Check {
+    match receipt
+        .provenance
+        .as_ref()
+        .and_then(|provenance| provenance.execution.as_ref())
+    {
+        Some(crate::storage::ExecutionDescriptor::Wrapped { command }) => {
+            return wrapped_recompute_check(receipt, workspace, command);
+        }
+        Some(crate::storage::ExecutionDescriptor::Native) => {
+            return native_recompute_check(receipt, workspace);
+        }
+        None => {}
+    }
+
+    // Old receipts did not distinguish wrap from native execution. A
+    // matching native pipeline hash can establish that interpretation;
+    // without a declaration we cannot recover an arbitrary wrapped command.
+    if !workspace.join("attest.yaml").exists() {
+        return check(
+            "recompute",
+            CheckStatus::Skipped,
+            "legacy receipt has no execution descriptor; wrapped recomputation requires recorded command and declarations, or a matching native attest.yaml",
+        );
+    }
+    let mut result = native_recompute_check(receipt, workspace);
+    result.detail = format!(
+        "legacy receipt, checked against native pipeline: {}",
+        result.detail
+    );
+    result
+}
+
+fn wrapped_recompute_check(receipt: &Receipt, workspace: &Path, command: &[String]) -> Check {
+    let checked = (|| -> Result<()> {
+        anyhow::ensure!(
+            !command.is_empty()
+                && !command[0].is_empty()
+                && command.iter().all(|argument| !argument.contains('\0')),
+            "wrapped command identity is missing or invalid"
+        );
+        anyhow::ensure!(
+            receipt.steps.len() == 1,
+            "wrapped receipt must describe one step"
+        );
+        let step = &receipt.steps[0];
+        let provenance = receipt
+            .provenance
+            .as_ref()
+            .context("missing wrapped declarations")?;
+        anyhow::ensure!(
+            provenance.steps.len() == 1,
+            "wrapped receipt must declare exactly one step's inputs and outputs"
+        );
+        let declaration = &provenance.steps[0];
+        anyhow::ensure!(
+            declaration.name == step.name && declaration.needs.is_empty(),
+            "wrapped declarations do not describe the recorded step"
+        );
+        anyhow::ensure!(
+            step.capsule_hash.is_none(),
+            "wrapped execution cannot claim a capsule"
+        );
+        let canonical = serde_json::to_string(command)?;
+        anyhow::ensure!(
+            crate::wrap::pipeline_hash(&canonical) == receipt.pipeline_hash,
+            "wrapped command identity does not match pipeline hash"
+        );
+        anyhow::ensure!(
+            blake3::hash(canonical.as_bytes()).to_hex().as_str() == declaration.command_hash,
+            "wrapped command identity does not match command hash"
+        );
+        let inputs: Vec<PathBuf> = declaration.inputs.iter().map(PathBuf::from).collect();
+        let outputs: Vec<PathBuf> = declaration.outputs.iter().map(PathBuf::from).collect();
+        let input_hash = crate::hashing::hash_inputs(workspace, &step.name, &canonical, &inputs)?;
+        anyhow::ensure!(input_hash == step.input_hash, "wrapped input hash mismatch");
+        let output_hash = crate::hashing::hash_outputs(workspace, &step.name, &outputs)?;
+        anyhow::ensure!(
+            output_hash == step.output_hash,
+            "wrapped output hash mismatch"
+        );
+        Ok(())
+    })();
+    match checked {
+        Ok(()) => check(
+            "recompute",
+            CheckStatus::Pass,
+            "wrapped command identity, declared inputs and outputs match; no native pipeline or sandbox is implied",
+        ),
+        Err(error) => check("recompute", CheckStatus::Fail, format!("{error:#}")),
+    }
+}
+
+fn native_recompute_check(receipt: &Receipt, workspace: &Path) -> Check {
     let pipeline_path = workspace.join("attest.yaml");
     let content = match std::fs::read_to_string(&pipeline_path) {
         Ok(content) => content,
