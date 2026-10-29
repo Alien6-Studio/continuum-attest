@@ -16,6 +16,7 @@
 # so it refuses to start on a dirty tree.
 #
 #   tools/mutation-gate.sh
+#   MUTATION_FILTER="release evidence:" tools/mutation-gate.sh
 #
 # Give it a checkout nothing else is using. It rewrites sources for minutes at
 # a time, and anything that changes the tree underneath it -- a parallel job,
@@ -51,6 +52,9 @@ trap restore EXIT
 # truth and names the fix.
 mutate () {
   local name=$1 file=$2 suite=$3 expect=$4 script=$5
+  if [[ -n "${MUTATION_FILTER:-}" && "$name" != *"$MUTATION_FILTER"* ]]; then
+    return
+  fi
   local target=(--test "$suite")
   if [ "$suite" = lib ]; then target=(--lib); fi
   CHECKED=$((CHECKED + 1))
@@ -376,6 +380,42 @@ mutate "archive rejects event signatures that do not hold" src/archive.rs \
   security_invariants forging_an_event_signature_inside_an_archive_is_refused \
   'new = s.replace("    if !unverifiable.is_empty() {", "    if false {")'
 
+mutate "release evidence: artifact bytes match their signed digest" src/evidence.rs \
+  security_invariants release_handoff::forging_release_evidence_by_substituting_an_artifact_is_refused \
+  'old = "blake3::hash(bytes).to_hex().as_str() == artifact.digest,"
+assert s.count(old) == 1, "artifact digest check moved"
+new = s.replace(old, "true || blake3::hash(bytes).to_hex().as_str() == artifact.digest,")'
+
+mutate "release evidence: inventory covers every declared output" src/evidence.rs \
+  security_invariants release_handoff::forging_release_evidence_by_omitting_a_declared_output_is_refused \
+  'old = "blake3::hash(manifest.as_bytes()).to_hex().as_str() == step.output_hash,"
+assert s.count(old) == 1, "artifact inventory check moved"
+new = s.replace(old, "true || blake3::hash(manifest.as_bytes()).to_hex().as_str() == step.output_hash,")'
+
+mutate "release evidence: repository comes from the authenticated certificate" src/identity.rs \
+  security_invariants release_handoff::forging_release_identity_by_claiming_an_uncertified_repository_is_refused \
+  'old = "    if repository != policy.repository {"
+assert s.count(old) == 1, "certified repository check moved"
+new = s.replace(old, "    if false && repository != policy.repository {")'
+
+mutate "release evidence: revision comes from the authenticated certificate" src/identity.rs \
+  security_invariants release_handoff::forging_release_identity_by_replaying_a_certificate_for_another_revision_is_refused \
+  'old = "    if revision != policy.revision {"
+assert s.count(old) == 1, "certified revision check moved"
+new = s.replace(old, "    if false && revision != policy.revision {")'
+
+mutate "release evidence: required workflow identity cannot be skipped" src/evidence.rs \
+  security_invariants release_handoff::forging_release_acceptance_by_removing_required_workflow_identity_is_refused \
+  'old = "    if let Some(policy) = identity_policy {"
+assert s.count(old) == 1, "required identity check moved"
+new = s.replace(old, "    if let Some(policy) = identity_policy.filter(|_| false) {")'
+
+mutate "release evidence: a failed build cannot authorize a release" src/evidence.rs \
+  security_invariants release_handoff::forging_release_acceptance_from_a_failed_build_is_refused \
+  'old = "required: vec![Requirement::Signature, Requirement::Success],"
+assert s.count(old) == 1, "release execution policy moved"
+new = s.replace(old, "required: vec![Requirement::Signature],")'
+
 # Deliberately not mutated: the archive's per-event id check is diagnostics,
 # not an independent protection. Since the chain root covers each event's full
 # content, a rewritten event already fails on the root; the id check exists so
@@ -385,6 +425,10 @@ mutate "archive rejects event signatures that do not hold" src/archive.rs \
 # one did would be exactly the decoration this gate exists to catch.
 
 echo
+if [ "$CHECKED" -eq 0 ]; then
+  echo "mutation-gate: no protection matched the requested filter." >&2
+  exit 2
+fi
 if [ "$FAILURES" -eq 0 ]; then
   echo "mutation-gate: ${CHECKED} protections, every one caught by its invariant."
 else

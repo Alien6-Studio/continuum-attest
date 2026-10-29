@@ -64,8 +64,11 @@ Skipped never satisfies a requirement, and the refusal names what was missing.
 execution outcome separately from the validity of the evidence, because a
 receipt of a failed build is still evidence.
 
-Exit codes are `0` pass, `1` verification failure, `2` operational error — the
-same convention across every command, so CI can branch on them.
+Verification exit codes are `0` pass, `1` verification failure, and `2`
+operational error. `run --wrap` preserves the build command's nonzero exit
+code, including when signing, storage or reporting also fails. Its optional
+`--report FILE` separates `build_exit_code` from `evidence_status`, records
+the exact new receipt path, and keeps the build's stdout unchanged.
 
 Evidence is untrusted input, and its size is the sender's choice. An archive is
 refused before anything in it is parsed if it is over 64 MiB on disk, expands
@@ -292,14 +295,20 @@ to ask you to trust an unattested download.
 
 ## Status
 
-Version 0.2. The core — pipelines, hashing, capsules, receipts, trust store,
-verification, causal ledger, in-toto/SLSA interop — is implemented and covered
-by the test suite, and `attest` attests its own CI on every commit. 0.2 adds
-trust that can be shared: signed trust bundles with pinned issuers, handover
-and rollback protection, verdicts under an explicit policy that name what they
-could not establish, a receipt that says which isolation controls were in
-force, inputs held still while a step runs, and a release whose evidence is
-bound to the exact bytes it publishes and signed in a job that builds nothing.
+Version 0.3 — Ember Sky. Existing GitHub and GitLab jobs can wrap their
+build command, sign its receipt, and publish a release evidence archive. The
+recipient verifies artifact bytes and successful execution offline against
+independently configured keys. An optional Sigstore bundle establishes the
+workflow's issuer, repository, workflow identity and source revision; this
+path requires Cosign 3 and a separately provisioned Sigstore trusted root.
+See the [producer and recipient guide](docs/ci-adoption.md) for both CI systems,
+policy examples and rejection scenarios.
+
+The receipt format and its signing bytes are unchanged. Local key signing,
+trust bundles, capsules, causal archives and in-toto/SLSA interop remain
+available. The new release archive has its own `attest-evidence/v1` format;
+its verdict adds `artifacts` and `identity` checks and is separate from the
+receipt-file JSON schema.
 
 Interfaces that carry a `schema_version` (receipts, `attest.yaml`) follow a
 documented compatibility policy: older receipts stay verifiable, and a receipt

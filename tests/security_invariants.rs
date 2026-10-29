@@ -2444,3 +2444,242 @@ fn forging_an_environment_variable_through_a_newline_is_refused() {
     );
     assert_eq!(second, "one", "the second pipeline's ZZ_A is plain 'one'");
 }
+
+// Release evidence: the transferred bytes and identity must meet recipient policy.
+#[path = "support/release.rs"]
+mod release_fixture;
+
+mod release_handoff {
+    use super::release_fixture::{check, Release};
+    use attest::crypto::sign::AttestKeypair;
+    use attest::keys::KeyStore;
+    use attest::storage::receipt_signing_bytes;
+    use attest::storage::Receipt;
+
+    #[cfg(unix)]
+    fn workflow_policy() -> attest::identity::IdentityPolicy {
+        attest::identity::IdentityPolicy {
+            issuer: "https://token.actions.githubusercontent.com".into(),
+            repository: "https://github.com/sigstore-conformance/extremely-dangerous-public-oidc-beacon".into(),
+            workflow: "https://github.com/sigstore-conformance/extremely-dangerous-public-oidc-beacon/.github/workflows/extremely-dangerous-oidc-beacon.yml@refs/heads/main".into(),
+            revision: "c7b3dfb335f051e1c86bda4c716fac97df62ad81".into(),
+            trusted_root: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/identity/trusted-root.json"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn pack_claimed_source(release: &Release, policy: &attest::identity::IdentityPolicy) {
+        let mut receipt: Receipt =
+            serde_yaml::from_slice(&std::fs::read(&release.receipt).unwrap()).unwrap();
+        receipt.provenance.as_mut().unwrap().source = Some(attest::storage::SourceInfo {
+            repository: Some(policy.repository.clone()),
+            commit: policy.revision.clone(),
+            branch: Some("main".into()),
+            tracked_dirty: false,
+        });
+        resign(release, &mut receipt);
+        std::fs::write(&release.receipt, serde_yaml::to_string(&receipt).unwrap()).unwrap();
+        release
+            .pack()
+            .arg("--identity-bundle")
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/identity/github.sigstore.json"),
+            )
+            .assert()
+            .success();
+    }
+
+    /// These two invariants isolate authorization after Cosign authenticates
+    /// its certificate. The shim stands in for that boundary; the real bundle
+    /// signature, identity and log proof are tested separately without a shim
+    /// by identity::tests::real_sigstore_verification and CI's offline gate.
+    #[cfg(unix)]
+    fn verify_certified_source(
+        release: &Release,
+        policy: &attest::identity::IdentityPolicy,
+        code: i32,
+    ) -> serde_json::Value {
+        use std::os::unix::fs::PermissionsExt;
+        let tools = release.recipient.path().join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let cosign = tools.join("cosign");
+        std::fs::write(
+            &cosign,
+            "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'GitVersion: v3.1.4'; fi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&cosign, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let policy_path = release.recipient.path().join("workflow-policy.json");
+        std::fs::write(&policy_path, serde_json::to_vec(policy).unwrap()).unwrap();
+        let output = super::release_fixture::attest()
+            .current_dir(release.recipient.path())
+            .env(
+                "PATH",
+                std::env::join_paths([
+                    tools.as_path(),
+                    std::path::Path::new("/usr/bin"),
+                    std::path::Path::new("/bin"),
+                ])
+                .unwrap(),
+            )
+            .args(["evidence", "verify"])
+            .arg(&release.archive)
+            .arg("--trust-store")
+            .arg(release.recipient.path().join(".attest/trust"))
+            .arg("--identity-policy")
+            .arg(policy_path)
+            .args(["--format", "json"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(check(&result, "signature")["status"], "pass");
+        assert_eq!(check(&result, "artifacts")["status"], "pass");
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forging_release_identity_by_claiming_an_uncertified_repository_is_refused() {
+        let release = Release::new(0);
+        let mut policy = workflow_policy();
+        pack_claimed_source(&release, &policy);
+        assert_eq!(
+            check(&verify_certified_source(&release, &policy, 0), "identity")["status"],
+            "pass"
+        );
+        // A trusted receipt signer claims another repository. The recipient
+        // requires that repository, but the attached certificate never did.
+        policy.repository = "https://github.com/recipient/required-project".into();
+        pack_claimed_source(&release, &policy);
+        let result = verify_certified_source(&release, &policy, 1);
+        assert_eq!(check(&result, "identity")["status"], "fail");
+        assert!(check(&result, "identity")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("certified source repository"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forging_release_identity_by_replaying_a_certificate_for_another_revision_is_refused() {
+        let release = Release::new(0);
+        let mut policy = workflow_policy();
+        pack_claimed_source(&release, &policy);
+        assert_eq!(
+            check(&verify_certified_source(&release, &policy, 0), "identity")["status"],
+            "pass"
+        );
+        // Receipt and recipient agree on a new revision; a certificate from
+        // an older job must not establish identity for that different source.
+        policy.revision = "a".repeat(40);
+        pack_claimed_source(&release, &policy);
+        let result = verify_certified_source(&release, &policy, 1);
+        assert_eq!(check(&result, "identity")["status"], "fail");
+        assert!(check(&result, "identity")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("certified source revision"));
+    }
+
+    #[test]
+    fn forging_release_evidence_by_substituting_an_artifact_is_refused() {
+        let release = Release::new(0);
+        release.mutate_archive(|entries| {
+            entries
+                .iter_mut()
+                .find(|entry| entry.path == "artifacts/dist/program")
+                .unwrap()
+                .bytes = b"substituted binary".to_vec();
+        });
+        let result = release.verify(&[], 1);
+        assert_eq!(check(&result, "signature")["status"], "pass");
+        assert_eq!(check(&result, "artifacts")["status"], "fail");
+        assert!(check(&result, "artifacts")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("digest mismatch"));
+    }
+
+    #[test]
+    fn forging_release_acceptance_from_a_failed_build_is_refused() {
+        let release = Release::new(7);
+        let result = release.verify(&[], 1);
+        assert_eq!(check(&result, "signature")["status"], "pass");
+        assert_eq!(check(&result, "artifacts")["status"], "pass");
+        assert!(result["policy"]["unmet"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|requirement| requirement["requirement"] == "success"));
+    }
+
+    #[test]
+    fn forging_release_evidence_by_omitting_a_declared_output_is_refused() {
+        let release = Release::new(0);
+        let mut receipt: Receipt =
+            serde_yaml::from_slice(&std::fs::read(&release.receipt).unwrap()).unwrap();
+        receipt
+            .provenance
+            .as_mut()
+            .unwrap()
+            .artifacts
+            .retain(|artifact| artifact.path != "dist/metadata");
+        resign(&release, &mut receipt);
+        let bytes = serde_yaml::to_string(&receipt).unwrap().into_bytes();
+        std::fs::write(&release.receipt, &bytes).unwrap();
+        release
+            .pack()
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("inventory does not match"));
+        release.mutate_archive(|entries| {
+            entries.retain(|entry| entry.path != "artifacts/dist/metadata");
+            entries
+                .iter_mut()
+                .find(|entry| entry.path == "receipt.yaml")
+                .unwrap()
+                .bytes = bytes;
+        });
+        let result = release.verify(&[], 1);
+        assert_eq!(check(&result, "signature")["status"], "pass");
+        assert_eq!(check(&result, "artifacts")["status"], "fail");
+    }
+
+    #[test]
+    fn forging_release_acceptance_by_removing_required_workflow_identity_is_refused() {
+        let release = Release::new(0);
+        let policy = release.recipient.path().join("workflow.json");
+        std::fs::write(&policy, serde_json::to_vec(&serde_json::json!({
+        "issuer": "https://token.actions.githubusercontent.com",
+        "repository": "https://github.com/example/project",
+        "workflow": "https://github.com/example/project/.github/workflows/release.yml@refs/heads/main",
+        "revision": "a".repeat(40),
+        "trusted_root": "recipient-sigstore-root.json"
+    })).unwrap()).unwrap();
+        let result = release.verify(&["--identity-policy", policy.to_str().unwrap()], 1);
+        assert_eq!(check(&result, "identity")["status"], "fail");
+        assert!(check(&result, "identity")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("missing"));
+    }
+
+    fn resign(release: &Release, receipt: &mut Receipt) {
+        let signing_key = KeyStore::new(release.producer.path())
+            .select_signing_key(Some(&release.key))
+            .unwrap()
+            .unwrap();
+        let keypair = AttestKeypair::from_signing_key(signing_key);
+        receipt.signature = Some(keypair.sign(receipt_signing_bytes(receipt).unwrap().as_bytes()));
+        receipt.signer_public_key = Some(keypair.public_key_hex());
+    }
+}

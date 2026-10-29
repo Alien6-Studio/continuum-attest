@@ -9,6 +9,129 @@ fn attest_cmd() -> Command {
     Command::cargo_bin("attest").expect("attest binary")
 }
 
+#[test]
+fn report_separates_failed_build_from_failed_signing() {
+    let workspace = tempfile::tempdir().unwrap();
+    let report = workspace.path().join("report.json");
+    attest_cmd()
+        .current_dir(workspace.path())
+        .args([
+            "run", "--wrap", "--name", "broken", "--sign", "--key", "missing",
+        ])
+        .arg("--report")
+        .arg(&report)
+        .args(["--", "sh", "-c", "exit 23"])
+        .assert()
+        .code(23);
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert_eq!(value["build_exit_code"], 23);
+    assert_eq!(value["evidence_status"], "failed");
+    assert!(value["receipt"].is_null());
+    assert!(value["error"].is_string());
+}
+
+#[test]
+fn report_names_only_this_invocations_receipt() {
+    let workspace = tempfile::tempdir().unwrap();
+    let report = workspace.path().join("report.json");
+    for _ in 0..2 {
+        attest_cmd()
+            .current_dir(workspace.path())
+            .args(["run", "--wrap", "--name", "build", "--report"])
+            .arg(&report)
+            .args(["--", "true"])
+            .assert()
+            .success();
+    }
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert_eq!(value["build_exit_code"], 0);
+    assert_eq!(value["evidence_status"], "produced");
+    assert!(Path::new(value["receipt"].as_str().unwrap()).is_file());
+    assert!(value["error"].is_null());
+    assert_eq!(
+        std::fs::read_dir(workspace.path().join(".attest/receipts"))
+            .unwrap()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn failed_build_keeps_exit_when_receipt_directory_is_unwritable() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join(".attest")).unwrap();
+    std::fs::write(workspace.path().join(".attest/receipts"), "not a directory").unwrap();
+    attest_cmd()
+        .current_dir(workspace.path())
+        .args([
+            "run", "--wrap", "--name", "broken", "--", "sh", "-c", "exit 19",
+        ])
+        .assert()
+        .code(19);
+}
+
+#[test]
+fn failed_build_keeps_exit_when_report_cannot_be_written() {
+    let workspace = tempfile::tempdir().unwrap();
+    attest_cmd()
+        .current_dir(workspace.path())
+        .args([
+            "run",
+            "--wrap",
+            "--name",
+            "broken",
+            "--report",
+            "missing/report.json",
+            "--",
+            "sh",
+            "-c",
+            "exit 17",
+        ])
+        .assert()
+        .code(17);
+}
+
+#[test]
+fn wrap_executes_in_the_declared_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let caller = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("input"), "right workspace").unwrap();
+    attest_cmd()
+        .current_dir(caller.path())
+        .args(wrap_args(workspace.path()))
+        .args([
+            "--name",
+            "copy",
+            "--input",
+            "input",
+            "--output",
+            "output",
+            "--",
+            "sh",
+            "-c",
+            "cp input output",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read(workspace.path().join("output")).unwrap(),
+        b"right workspace"
+    );
+    assert!(!caller.path().join("output").exists());
+}
+
+#[test]
+fn report_requires_wrap_before_executing() {
+    let workspace = tempfile::tempdir().unwrap();
+    attest_cmd()
+        .current_dir(workspace.path())
+        .args(["run", "--report", "report.json"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("--report requires --wrap"));
+    assert!(!workspace.path().join("report.json").exists());
+}
+
 fn wrap_args(workspace: &Path) -> Vec<String> {
     vec![
         "run".to_string(),

@@ -1,59 +1,55 @@
-# attest wrap-mode composite action for GitHub Actions.
-#
-# Attests what an existing job already runs, without migrating it to an
-# attest pipeline: hashes the declared inputs before the command and the
-# declared outputs after it, and writes a receipt under
-# `.attest/receipts/`.
-#
-# The binary is pinned by version AND sha256; the download is refused on
-# any mismatch. No `curl | sh`.
-#
-# Usage:
-#
-#   - uses: Alien6-Studio/continuum-attest/ci-templates/github/attest-action@v0.1.0
-#     with:
-#       version: "0.1.0"
-#       sha256: "<sha256 of attest-v0.1.0-linux-x86_64.tar.gz>"
-#       step-name: "build"
-#       inputs: "src Cargo.toml"
-#       outputs: "target/release/app"
-#       command: "cargo build --release"
-#
-# The sha256 of every asset is published in the release's SHA256SUMS file.
-# Pin the action itself to a tag or a commit, never to a branch.
-
+# Pin this action to an audited commit and the binary to its SHA256SUMS digest.
 name: "attest wrap"
-description: "Run a command under attest run --wrap and produce a receipt"
+description: "Wrap an existing build, sign its receipt and publish offline release evidence"
 
 inputs:
   version:
-    description: "attest release version to download, without the leading v"
+    description: "attest release version without v (0.3.0 or newer)"
     required: true
   sha256:
-    description: "Expected sha256 of the release tarball (pinned)"
+    description: "Pinned SHA-256 of attest-vVERSION-linux-x86_64.tar.gz"
     required: true
   step-name:
     description: "Step name recorded in the receipt"
     required: true
   command:
-    description: "Command to wrap (run via sh -c)"
+    description: "Build command, executed by sh -c"
     required: true
   inputs:
-    description: "Space-separated declared input paths"
-    required: false
+    description: "Whitespace-separated declared input paths; no glob expansion"
     default: ""
   outputs:
-    description: "Space-separated declared output paths"
-    required: false
+    description: "Whitespace-separated declared output paths; included in the evidence archive"
     default: ""
+  key:
+    description: "Local signing key ID; provision its store with ATTEST_KEYS_DIR"
+    default: ""
+  identity:
+    description: "Also bind the receipt to GitHub OIDC with cosign v3; requires id-token: write"
+    default: "false"
   extra-args:
-    description: "Extra flags for attest run --wrap (e.g. --sign)"
-    required: false
+    description: "Additional wrap flags, shell-quoted if needed; --sign is always enabled"
     default: ""
   base-url:
-    description: "Override the release store, e.g. an internal mirror"
-    required: false
+    description: "HTTPS release store or internal mirror"
     default: "https://github.com/Alien6-Studio/continuum-attest/releases/download"
+
+outputs:
+  build-exit-code:
+    description: "Wrapped command exit code, or empty when it did not start"
+    value: ${{ steps.build.outputs.build-exit-code }}
+  evidence-status:
+    description: "produced or failed, independently of the build outcome"
+    value: ${{ steps.build.outputs.evidence-status }}
+  publication-status:
+    description: "published, failed or skipped, from the actual upload outcome"
+    value: ${{ steps.finish.outputs.publication-status }}
+  receipt:
+    description: "Exact receipt path produced by this invocation"
+    value: ${{ steps.build.outputs.receipt }}
+  evidence:
+    description: "Local path of the self-contained evidence archive"
+    value: ${{ steps.build.outputs.evidence }}
 
 runs:
   using: "composite"
@@ -61,43 +57,69 @@ runs:
     - name: Install pinned attest binary
       shell: bash
       env:
-        VERSION: ${{ inputs.version }}
-        SHA256: ${{ inputs.sha256 }}
-        BASE_URL: ${{ inputs.base-url }}
+        ATTEST_VERSION: ${{ inputs.version }}
+        ATTEST_SHA256: ${{ inputs.sha256 }}
+        ATTEST_BASE_URL: ${{ inputs.base-url }}
       run: |
         set -euo pipefail
-        PKG="attest-v${VERSION}-linux-x86_64.tar.gz"
-        curl -fsSLo "$PKG" "${BASE_URL}/v${VERSION}/${PKG}"
-        echo "${SHA256}  ${PKG}" | sha256sum -c -
-        tar -xzf "$PKG" attest
-        chmod +x attest
-        echo "$PWD" >> "$GITHUB_PATH"
+        [[ "$(uname -s)/$(uname -m)" == "Linux/x86_64" ]] || { echo 'attest action requires Linux x86_64' >&2; exit 2; }
+        [[ "$ATTEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || exit 2
+        [[ "$ATTEST_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || exit 2
+        install_dir="$(mktemp -d "$RUNNER_TEMP/attest-bin.XXXXXX")"
+        package="attest-v${ATTEST_VERSION}-linux-x86_64.tar.gz"
+        curl --proto '=https' --tlsv1.2 -fsSLo "$install_dir/$package" "${ATTEST_BASE_URL}/v${ATTEST_VERSION}/${package}"
+        (cd "$install_dir" && printf '%s  %s\n' "$ATTEST_SHA256" "$package" | sha256sum -c -)
+        tar -xzf "$install_dir/$package" -C "$install_dir" attest
+        chmod +x "$install_dir/attest"
+        echo "$install_dir" >> "$GITHUB_PATH"
 
-    # Inputs reach the shell through the environment, never through
-    # ${{ }} interpolation into the script body: a command containing a
-    # quote would otherwise break out of it.
-    - name: Wrap command with attest
+    - name: Build and produce evidence
+      id: build
       shell: bash
       env:
-        STEP_NAME: ${{ inputs.step-name }}
-        COMMAND: ${{ inputs.command }}
-        DECLARED_INPUTS: ${{ inputs.inputs }}
-        DECLARED_OUTPUTS: ${{ inputs.outputs }}
-        EXTRA_ARGS: ${{ inputs.extra-args }}
-      run: |
-        set -euo pipefail
-        set -- run --wrap --name "$STEP_NAME"
-        for path in $DECLARED_INPUTS;  do set -- "$@" --input  "$path"; done
-        for path in $DECLARED_OUTPUTS; do set -- "$@" --output "$path"; done
-        # shellcheck disable=SC2086
-        attest "$@" $EXTRA_ARGS -- sh -c "$COMMAND"
+        ATTEST_STEP_NAME: ${{ inputs.step-name }}
+        ATTEST_COMMAND: ${{ inputs.command }}
+        ATTEST_INPUTS: ${{ inputs.inputs }}
+        ATTEST_OUTPUTS: ${{ inputs.outputs }}
+        ATTEST_KEY: ${{ inputs.key }}
+        ATTEST_IDENTITY: ${{ inputs.identity }}
+        ATTEST_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: python3 "$GITHUB_ACTION_PATH/run.py"
 
-    - name: Upload receipts
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    - name: Publish release evidence and build report
+      id: publish
+      if: ${{ !cancelled() && steps.build.outputs.directory != '' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: attest-receipts-${{ inputs.step-name }}
-        path: .attest/receipts/
-        # `.attest/` is hidden; without this the action uploads nothing and
-        # if-no-files-found below fails every run.
+        name: attest-evidence-${{ inputs.step-name }}
+        path: ${{ steps.build.outputs.directory }}/
         include-hidden-files: true
         if-no-files-found: error
+
+    - name: Report publication and restore build exit code
+      id: finish
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        ATTEST_EXIT_CODE: ${{ steps.build.outputs.exit-code }}
+        ATTEST_BUILD_OUTCOME: ${{ steps.build.outcome }}
+        ATTEST_PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+      run: |
+        set -euo pipefail
+        case "$ATTEST_PUBLISH_OUTCOME" in
+          success) publication=published ;;
+          failure) publication=failed ;;
+          *) publication=skipped ;;
+        esac
+        report_status=0
+        echo "publication-status=$publication" >> "$GITHUB_OUTPUT" || report_status=$?
+        echo "attest: publication $publication"
+        # A failed build keeps its code even if evidence or upload also failed.
+        if [[ -n "$ATTEST_EXIT_CODE" && "$ATTEST_EXIT_CODE" != 0 ]]; then exit "$ATTEST_EXIT_CODE"; fi
+        # If output reporting failed, the build step already exited with the
+        # original code. Do not add a new failure that obscures it.
+        if [[ "$ATTEST_BUILD_OUTCOME" != success ]]; then exit 0; fi
+        [[ -n "$ATTEST_EXIT_CODE" ]] || exit 2
+        [[ "$report_status" == 0 ]] || exit 2
+        [[ "$publication" == published ]] || exit 2

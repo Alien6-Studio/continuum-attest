@@ -22,6 +22,18 @@ enum Commands {
     /// Initialize ATTEST repository
     Init,
 
+    /// Package and verify a release's receipt and artifact bytes
+    Evidence {
+        #[command(subcommand)]
+        action: EvidenceCommands,
+    },
+
+    /// Bind a receipt to a CI workflow using a Sigstore bundle
+    Identity {
+        #[command(subcommand)]
+        action: IdentityCommands,
+    },
+
     /// Run pipeline with attestation
     Run {
         #[arg(short, long, value_name = "FILE", help = "Pipeline file path")]
@@ -103,6 +115,13 @@ enum Commands {
             help = "Command to execute after `--` (--wrap only)"
         )]
         command: Vec<String>,
+
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Write build and evidence outcomes as JSON (--wrap only)"
+        )]
+        report: Option<std::path::PathBuf>,
     },
 
     /// Sign a receipt produced elsewhere, in a process that ran no project command
@@ -773,6 +792,53 @@ enum CausalCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum EvidenceCommands {
+    /// Package a signed receipt and its declared artifacts for offline transfer
+    Pack {
+        receipt: std::path::PathBuf,
+        #[arg(long)]
+        output: std::path::PathBuf,
+        #[arg(long, default_value = ".")]
+        workspace: std::path::PathBuf,
+        #[arg(long)]
+        identity_bundle: Option<std::path::PathBuf>,
+    },
+    /// Require trusted signature, successful build and matching artifact bytes
+    Verify {
+        archive: std::path::PathBuf,
+        #[arg(long, help = "Recipient's independently provisioned trust store")]
+        trust_store: std::path::PathBuf,
+        #[arg(
+            long,
+            help = "Recipient's JSON workflow policy and local Sigstore trust root"
+        )]
+        identity_policy: Option<std::path::PathBuf>,
+        #[arg(
+            long,
+            help = "Also verify separately distributed artifacts under this directory"
+        )]
+        artifact_root: Option<std::path::PathBuf>,
+        #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum IdentityCommands {
+    /// Sign the exact receipt bytes using cosign v3 and the CI's OIDC identity
+    Sign {
+        receipt: std::path::PathBuf,
+        #[arg(long)]
+        bundle: std::path::PathBuf,
+        #[arg(
+            long,
+            help = "Environment variable holding an OIDC token (e.g. GitLab)"
+        )]
+        identity_token_env: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -797,6 +863,32 @@ async fn main() -> Result<()> {
     let attest = AttestCore::new().await?;
 
     match cli.command {
+        Commands::Evidence { action } => std::process::exit(handle_evidence(action)),
+        Commands::Identity { action } => {
+            let IdentityCommands::Sign {
+                receipt,
+                bundle,
+                identity_token_env,
+            } = action;
+            let result = (|| -> Result<()> {
+                let token = identity_token_env
+                    .map(|name| {
+                        std::env::var(&name).map_err(|_| {
+                            anyhow::anyhow!("OIDC token environment variable is missing or invalid")
+                        })
+                    })
+                    .transpose()?;
+                attest::identity::sign_receipt_identity(&receipt, &bundle, token.as_deref())?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => std::process::exit(0),
+                Err(error) => {
+                    eprintln!("error: workflow identity signing failed: {error:#}");
+                    std::process::exit(2);
+                }
+            }
+        }
         Commands::Init => match attest.init().await {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -819,6 +911,7 @@ async fn main() -> Result<()> {
             outputs,
             workspace,
             command,
+            report,
         } => {
             // Before anything runs, once, for every way a run can happen:
             // a wrapped command, a pipeline, or a pipeline replayed for
@@ -916,6 +1009,13 @@ async fn main() -> Result<()> {
                     why: "--wrap runs without a sandbox",
                 },
             ]);
+            refuse_unmet(&[Prerequisite {
+                option: "--report",
+                given: report.is_some(),
+                requires: "--wrap",
+                met: wrap,
+                why: "a wrap report describes one existing build command",
+            }]);
             if wrap {
                 // Both guaranteed by the rules above.
                 let name = name.unwrap_or_default();
@@ -939,7 +1039,7 @@ async fn main() -> Result<()> {
                     }),
                     workspace,
                 };
-                match attest::wrap::run_wrap(&command, &options) {
+                match attest::wrap::run_wrap_with_report(&command, &options, report.as_deref()) {
                     Ok(code) => std::process::exit(code),
                     Err(e) => {
                         eprintln!("error: {e:#}");
@@ -1653,6 +1753,68 @@ fn handle_trust(action: TrustCommands) -> i32 {
                 0
             } else {
                 1
+            }
+        }
+    }
+}
+
+fn handle_evidence(action: EvidenceCommands) -> i32 {
+    match action {
+        EvidenceCommands::Pack {
+            receipt,
+            workspace,
+            output,
+            identity_bundle,
+        } => {
+            match attest::evidence::pack(&receipt, &workspace, &output, identity_bundle.as_deref())
+            {
+                Ok(()) => {
+                    println!("{}", output.display());
+                    0
+                }
+                Err(error) => {
+                    report_operational_error(&output.display().to_string(), &error, "text")
+                }
+            }
+        }
+        EvidenceCommands::Verify {
+            archive,
+            trust_store,
+            identity_policy,
+            artifact_root,
+            format,
+        } => {
+            let result = (|| -> Result<_> {
+                let policy = identity_policy
+                    .map(|path| -> Result<attest::identity::IdentityPolicy> {
+                        let bytes =
+                            attest::verify::read_bounded(&path, 1024 * 1024, "identity policy")?;
+                        let mut policy: attest::identity::IdentityPolicy =
+                            serde_json::from_slice(&bytes)?;
+                        if policy.trusted_root.is_relative() {
+                            policy.trusted_root = path
+                                .parent()
+                                .unwrap_or(std::path::Path::new("."))
+                                .join(&policy.trusted_root);
+                        }
+                        Ok(policy)
+                    })
+                    .transpose()?;
+                attest::evidence::verify(
+                    &archive,
+                    &trust_store,
+                    policy.as_ref(),
+                    artifact_root.as_deref(),
+                )
+            })();
+            match result {
+                Ok(verdict) => {
+                    print_verdict(&verdict, &format);
+                    i32::from(!verdict.passed())
+                }
+                Err(error) => {
+                    report_operational_error(&archive.display().to_string(), &error, &format)
+                }
             }
         }
     }
