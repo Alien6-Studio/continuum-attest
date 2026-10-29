@@ -23,6 +23,111 @@ use predicates::prelude::*;
 
 use attest::hashing::{hash_outputs, output_manifest};
 
+/// A custom TSA URL must not make a signed-token protocol use unauthenticated
+/// transport. The refusing call must reach the production request path, and
+/// the plaintext listener must never receive a connection or a message imprint.
+#[test]
+fn forging_a_timestamp_authority_through_plaintext_transport_is_refused() {
+    assert_plaintext_timestamp_authority_is_refused();
+}
+
+/// CLI signing runs inside Tokio. A transport refusal must remain a normal
+/// error there, rather than reqwest panicking while dropping its runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn a_timestamp_transport_refusal_inside_tokio_returns_an_error() {
+    assert_plaintext_timestamp_authority_is_refused();
+}
+
+fn assert_plaintext_timestamp_authority_is_refused() {
+    use attest::crypto::timestamp::{request_token, TimestampError};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let impersonator = TcpListener::bind("127.0.0.1:0").unwrap();
+    impersonator.set_nonblocking(true).unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}",
+        impersonator.local_addr().unwrap().port()
+    );
+    let error = request_token(&url, &[0x5a; 32], Duration::from_millis(250))
+        .expect_err("an HTTP timestamp endpoint must be refused before a request is sent");
+    match error {
+        TimestampError::Transport { source, .. } => assert!(
+            source.is_builder(),
+            "the URL must be refused before transport, not fail later: {source}"
+        ),
+        other => panic!("expected an HTTPS-only transport refusal, got {other}"),
+    }
+    assert!(
+        matches!(impersonator.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "a plaintext endpoint received a connection before the scheme was rejected"
+    );
+}
+
+fn sha384_timestamp_fixture() -> (Vec<u8>, [u8; 32], Vec<u8>) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/timestamp");
+    let token = std::fs::read(root.join("sectigo-token.der")).unwrap();
+    let imprint = std::fs::read_to_string(root.join("sectigo-fixture-imprint.txt")).unwrap();
+    let imprint = hex::decode(imprint.trim()).unwrap().try_into().unwrap();
+    let issuer = std::fs::read(root.join("sectigo-tsa-ca.der")).unwrap();
+    (token, imprint, issuer)
+}
+
+/// A valid RSA signature must not make an unknown or inconsistent algorithm
+/// declaration acceptable. CMS keeps these identifiers outside signedAttrs.
+#[test]
+fn forging_a_timestamp_cms_signature_algorithm_is_refused() {
+    use attest::crypto::timestamp::{verify_token, TimestampError};
+    let (token, imprint, issuer) = sha384_timestamp_fixture();
+    let pinned = [issuer];
+    verify_token(&token, &imprint, &pinned).expect("the original SHA-384 token verifies");
+    let rsa_encryption = [
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    ];
+    let position = token
+        .windows(rsa_encryption.len())
+        .rposition(|w| w == rsa_encryption)
+        .unwrap();
+    let mut unknown = token.clone();
+    unknown[position + rsa_encryption.len() - 1] = 0x7f;
+    assert!(matches!(
+        verify_token(&unknown, &imprint, &pinned),
+        Err(TimestampError::Unsupported("RSA signature algorithm"))
+    ));
+    let mut mismatched = token;
+    // Relabel rsaEncryption as sha256WithRSAEncryption, keeping the genuine
+    // SHA-384 signature intact. Verification must not guess past the label.
+    mismatched[position + rsa_encryption.len() - 1] = 0x0b;
+    assert!(matches!(
+        verify_token(&mismatched, &imprint, &pinned),
+        Err(TimestampError::Malformed(
+            "CMS signature and digest algorithms differ"
+        ))
+    ));
+}
+
+#[test]
+fn forging_a_timestamp_cms_digest_declaration_is_refused() {
+    use attest::crypto::timestamp::{verify_token, TimestampError};
+    let (mut token, imprint, issuer) = sha384_timestamp_fixture();
+    let sha384 = [
+        0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
+    ];
+    let position = token
+        .windows(sha384.len())
+        .position(|w| w == sha384)
+        .unwrap();
+    // The first digest OID is SignedData.digestAlgorithms. The SignerInfo
+    // still selects SHA-384 and the original signature is still valid.
+    token[position + sha384.len() - 1] = 0x01;
+    assert!(matches!(
+        verify_token(&token, &imprint, &[issuer]),
+        Err(TimestampError::Malformed(
+            "CMS digest algorithm is not declared"
+        ))
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Manifest encoding: distinct trees must have distinct hashes.
 // ---------------------------------------------------------------------------

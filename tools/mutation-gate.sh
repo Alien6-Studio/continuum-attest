@@ -129,6 +129,30 @@ PY
 echo "Breaking each protection in turn; each must fail its invariant."
 echo
 
+mutate "timestamp transport requires HTTPS" src/crypto/timestamp.rs \
+  security_invariants forging_a_timestamp_authority_through_plaintext_transport_is_refused \
+  'old = ".https_only(true)"
+assert s.count(old) == 1, "HTTPS-only timestamp transport moved"
+new = s.replace(old, ".https_only(false)")'
+
+mutate "timestamp transport isolates its blocking client from Tokio" src/crypto/timestamp.rs \
+  security_invariants a_timestamp_transport_refusal_inside_tokio_returns_an_error \
+  'old = "if tokio::runtime::Handle::try_current().is_ok() {"
+assert s.count(old) == 1, "timestamp runtime isolation moved"
+new = s.replace(old, "if false {")'
+
+mutate "timestamp CMS signature algorithm must match its digest" src/crypto/timestamp.rs \
+  security_invariants forging_a_timestamp_cms_signature_algorithm_is_refused \
+  'old = "if signature_oid != OID_RSA_ENCRYPTION"
+assert s.count(old) == 1, "timestamp CMS signature algorithm check moved"
+new = s.replace(old, "if false && signature_oid != OID_RSA_ENCRYPTION")'
+
+mutate "timestamp CMS digest must be declared" src/crypto/timestamp.rs \
+  security_invariants forging_a_timestamp_cms_digest_declaration_is_refused \
+  'old = "if !declared_digests.contains(&digest_algorithm) {"
+assert s.count(old) == 1, "timestamp CMS digest declaration check moved"
+new = s.replace(old, "if false {")'
+
 mutate "manifest rejects control characters" src/hashing.rs \
   security_invariants forging_a_manifest_entry_through_a_newline_in_a_filename_is_refused \
   'new = s.replace("if let Some(bad) = part.chars().find(|c| c.is_control()) {", "if let Some(bad) = part.chars().find(|_| false) {")'

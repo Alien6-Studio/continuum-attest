@@ -511,10 +511,9 @@ created: "{}"
     /// which is the whole point — it places that signature in time, by a
     /// party the signer does not control.
     ///
-    /// The default authority is DigiCert's public service. It is free and
-    /// its issuing certificates are widely distributed, but it publishes no
-    /// terms for this endpoint, so anything depending on it should pin its
-    /// own choice with `--tsa` and keep more than one option open.
+    /// The caller chooses an HTTPS authority; the CLI uses `DEFAULT_TSA_URL`
+    /// unless `--tsa` is supplied. Recipients independently pin the chosen
+    /// authority's issuing certificate for offline verification.
     pub fn timestamp_receipt(&self, receipt: &Receipt, tsa_url: &str) -> Result<Receipt> {
         use base64::Engine as _;
 

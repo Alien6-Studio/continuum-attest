@@ -48,6 +48,15 @@ authentication action. Patch updates to tokio, rustls-webpki and webpki-roots
 resolve RUSTSEC-2026-0386, RUSTSEC-2026-0382 and RUSTSEC-2026-0381. The MSRV
 remains Rust 1.89.
 
+Timestamp requests now require HTTPS, including custom `--tsa` URLs, and
+refuse a redirect to an insecure transport. The default endpoint is now
+`https://timestamp.sectigo.com/rfc3161`; recipients must independently pin
+the chosen authority with `attest keys trust-tsa`. Existing timestamped
+receipts remain verifiable offline with their pinned authorities.
+Timestamp signatures support SHA-256 and SHA-384 with explicit algorithm checks.
+Timestamping also works when called from the CLI's asynchronous runtime;
+transport failures are reported as errors instead of triggering a panic.
+
 ## Check this release before you run it
 
 ```console

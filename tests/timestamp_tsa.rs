@@ -10,20 +10,20 @@
 
 use std::time::Duration;
 
-use attest::crypto::timestamp::{build_request, request_token, token_from_response};
-
-const DIGICERT: &str = "http://timestamp.digicert.com";
+use attest::crypto::timestamp::{
+    build_request, request_token, token_from_response, DEFAULT_TSA_URL,
+};
 
 #[test]
 #[ignore = "requires network access to a timestamp authority"]
-fn digicert_grants_a_token_for_our_hand_rolled_request() {
+fn default_https_authority_grants_a_token_for_our_request() {
     // Stands in for the bytes of an Ed25519 receipt signature.
     let digest: [u8; 32] = *blake3::hash(b"attest signature bytes").as_bytes();
 
     let request = build_request(&digest);
     assert_eq!(request.len(), 59, "request encoding drifted");
 
-    let token = request_token(DIGICERT, &digest, Duration::from_secs(30))
+    let token = request_token(DEFAULT_TSA_URL, &digest, Duration::from_secs(30))
         .expect("the authority granted a token");
 
     // A token is a few kilobytes of CMS. Anything tiny means we parsed the
@@ -58,5 +58,5 @@ fn digicert_grants_a_token_for_our_hand_rolled_request() {
         "a token we stored does not round trip through our own parser"
     );
 
-    println!("token: {} bytes from {}", token.len(), DIGICERT);
+    println!("token: {} bytes from {}", token.len(), DEFAULT_TSA_URL);
 }

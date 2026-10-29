@@ -89,9 +89,9 @@ fn a_timestamp_token_defeats_a_backdated_receipt() {
         .trust_tsa(
             std::path::Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/timestamp/digicert-tsa-ca.der"
+                "/tests/fixtures/timestamp/sectigo-tsa-ca.der"
             )),
-            "digicert",
+            "sectigo",
         )
         .expect("authority pinned");
 

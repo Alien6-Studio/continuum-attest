@@ -133,8 +133,12 @@ whose receipt does not describe it — which is the point.
   output hashes. The verdict goes in the receipt.
 - **Trusted timestamps.** `attest run --sign --timestamp` asks an RFC 3161
   authority to countersign the signature, and stores the token in the
-  receipt. Verification is offline and checks it against an authority you
+  receipt. Timestamp requests require HTTPS, including custom `--tsa` URLs.
+  The default authority is `https://timestamp.sectigo.com/rfc3161`.
+  Verification is offline and checks the token against an authority you
   pinned yourself with `attest keys trust-tsa`.
+  For scripted signing, [Sectigo requests at least 15 seconds between
+  signatures](https://www.sectigo.com/knowledge-base/detail/Time-Stamp-Server-Stamping-Protocols-for-Digital-Signatures-Code-Signing).
 - **Trust you can hand over.** `attest trust bundle` signs the keys your store
   trusts and has revoked, each revocation dated, into one file with an issuer
   and a validity window. `attest trust show` tells a recipient who issued it,
