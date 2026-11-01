@@ -388,8 +388,16 @@ Linux x86_64 runner that permits network namespaces. An inability to disconnect
 fails the job; it never retries verification online. A private GitLab issuer
 also needs a compatible private Sigstore service and independently supplied
 trust roots; merely having a private GitLab server does not provide that
-signing service. The GitLab hosted run remains a separate acceptance task;
-local contract tests and the GitHub run do not substitute for it.
+signing service.
+
+The [0.3.1 qualification record](https://github.com/Alien6-Studio/continuum-attest/issues/25)
+now includes a real self-managed GitLab pipeline: fresh provider-issued
+identity, transferred evidence, offline acceptance, and the specific artifact
+and workflow refusals with exit-code assertions. The same delivered evidence
+was checked on a second machine without network access. That qualification
+used temporary test signing infrastructure; production deployments still need
+their own services and independently provisioned recipient trust. Local upload
+contract tests remain distinct from this provider acceptance evidence.
 
 To recompute a wrapped receipt's command identity and declared input/output
 hashes without `attest.yaml`, see [Wrapped recomputation](wrapped-recomputation.md).

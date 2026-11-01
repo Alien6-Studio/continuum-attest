@@ -59,16 +59,19 @@ revocations issued after its last update.
 
 ## 0.3 — Ember Sky: adoption in existing CI
 
-Implementation: [CI adoption guide](docs/ci-adoption.md), GitHub composite
-action, GitLab component, `run --wrap --report`, `identity sign`, and
-`evidence pack|verify`. Local tests exercise artifact substitution, missing
-trust, unauthorized workflow evidence and build/evidence failure separation.
-The release workflow checks fresh GitHub workflow identity in a transferred
-producer/recipient handoff with network access disabled for verification.
-The real GitLab job remains a release acceptance gate; local runner tests do
-not replace provider-issued identity evidence. Publishing 0.3.0 did not
-complete this milestone. Remaining criteria are implemented and validated
-against the original tickets before the corrective release is accepted.
+**Status: completed with 0.3.1, qualified on 2026-11-01.** A team can wrap
+an existing build job and deliver evidence its recipient checks independently.
+Real GitHub Actions and self-managed GitLab jobs have demonstrated acceptance
+and the specific refusals for an artifact substitution and an unauthorized
+workflow, with recipient networking disabled. The GitLab evidence was also
+transferred to a second machine and checked without network access.
+The [qualification record](https://github.com/Alien6-Studio/continuum-attest/issues/25)
+links the CI runs and retained verdicts.
+
+The [CI adoption guide](docs/ci-adoption.md) covers the producer and recipient
+handoff. Self-managed GitLab workflow identity requires separately configured
+signing services and recipient trust roots. Qualification used temporary test
+infrastructure; it does not supply production signing infrastructure.
 
 **Outcome:** a team can attest one existing build job and hand its output to
 a recipient without migrating its pipeline to Attest.
