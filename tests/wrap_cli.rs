@@ -396,3 +396,253 @@ fn wrap_flag_validation() {
         .expect("run");
     assert_eq!(output.status.code(), Some(2));
 }
+
+fn wrapped_copy() -> (tempfile::TempDir, PathBuf) {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("in.txt"), "original\n").unwrap();
+    attest_cmd()
+        .current_dir(workspace.path())
+        .args([
+            "run",
+            "--wrap",
+            "--name",
+            "copy",
+            "--input",
+            "in.txt",
+            "--output",
+            "out.txt",
+            "--",
+            "sh",
+            "-c",
+            "cp in.txt out.txt",
+        ])
+        .assert()
+        .success();
+    let receipt = std::fs::read_dir(workspace.path().join(".attest/receipts"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    (workspace, receipt)
+}
+
+fn recompute_json(workspace: &Path, receipt: &Path, require: bool, code: i32) -> serde_json::Value {
+    let mut command = attest_cmd();
+    command
+        .current_dir(workspace)
+        .arg("verify")
+        .arg(receipt)
+        .args([
+            "--recompute",
+            "--check-signatures",
+            "false",
+            "--format",
+            "json",
+        ]);
+    if require {
+        command.args(["--require", "recompute"]);
+    }
+    let result = command.assert().code(code).get_output().stdout.clone();
+    serde_json::from_slice(&result).unwrap()
+}
+
+#[test]
+fn wrapped_receipt_recomputes_after_transfer_without_a_pipeline_file() {
+    let (producer, receipt_path) = wrapped_copy();
+    let recipient = tempfile::tempdir().unwrap();
+    let keys = attest::keys::KeyStore::new(producer.path());
+    let key = keys.generate("producer").unwrap();
+    attest_cmd()
+        .current_dir(producer.path())
+        .arg("sign")
+        .arg(&receipt_path)
+        .args(["--key", &key])
+        .assert()
+        .success();
+    let delivered = recipient.path().join("receipt.yaml");
+    for (source, target) in [
+        (receipt_path, delivered.clone()),
+        (
+            producer.path().join("in.txt"),
+            recipient.path().join("in.txt"),
+        ),
+        (
+            producer.path().join("out.txt"),
+            recipient.path().join("out.txt"),
+        ),
+    ] {
+        std::fs::copy(source, target).unwrap();
+    }
+    let trust = recipient.path().join("trust");
+    std::fs::create_dir(&trust).unwrap();
+    for entry in std::fs::read_dir(producer.path().join(".attest/trust")).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), trust.join(entry.file_name())).unwrap();
+    }
+    assert!(!producer.path().join("attest.yaml").exists());
+    producer.close().unwrap();
+    let output = attest_cmd()
+        .current_dir(recipient.path())
+        .arg("verify")
+        .arg(&delivered)
+        .args([
+            "--recompute",
+            "--require",
+            "signature,recompute,success",
+            "--offline",
+        ])
+        .arg("--trust-store")
+        .arg(&trust)
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let verdict: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(verdict["verdict"], "pass");
+    assert!(verdict["checks"].as_array().unwrap().iter().any(|check| {
+        check["name"] == "recompute"
+            && check["status"] == "pass"
+            && check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("wrapped command identity")
+    }));
+    assert!(!recipient.path().join("attest.yaml").exists());
+    assert!(!recipient.path().join(".attest/keys").exists());
+}
+
+#[test]
+fn legacy_wrapped_receipt_without_execution_description_cannot_claim_recomputation() {
+    let (workspace, path) = wrapped_copy();
+    let mut receipt: attest::storage::Receipt =
+        serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    receipt.provenance.as_mut().unwrap().execution = None;
+    std::fs::write(&path, serde_yaml::to_string(&receipt).unwrap()).unwrap();
+    let optional = recompute_json(workspace.path(), &path, false, 0);
+    let check = optional["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "recompute")
+        .unwrap();
+    assert_eq!(check["status"], "skipped");
+    assert!(check["detail"]
+        .as_str()
+        .unwrap()
+        .contains("no execution descriptor"));
+    let required = recompute_json(workspace.path(), &path, true, 1);
+    assert_eq!(required["policy"]["unmet"][0]["requirement"], "recompute");
+}
+
+#[test]
+fn malformed_wrapped_declarations_fail_explicitly() {
+    let (workspace, path) = wrapped_copy();
+    let original: attest::storage::Receipt =
+        serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for case in 0..3 {
+        let mut receipt = original.clone();
+        match case {
+            0 => receipt.provenance.as_mut().unwrap().steps.clear(),
+            1 => {
+                receipt.provenance.as_mut().unwrap().execution =
+                    Some(attest::storage::ExecutionDescriptor::Wrapped { command: vec![] })
+            }
+            _ => receipt.steps.clear(),
+        }
+        std::fs::write(&path, serde_yaml::to_string(&receipt).unwrap()).unwrap();
+        let verdict = recompute_json(workspace.path(), &path, true, 1);
+        assert_eq!(verdict["verdict"], "fail");
+        assert!(verdict["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "recompute" && check["status"] == "fail"));
+    }
+}
+
+#[test]
+fn github_and_gitlab_wrapped_receipts_share_the_recompute_contract() {
+    for provider in ["github", "gitlab"] {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("input"), "CI payload").unwrap();
+        let mut command = attest_cmd();
+        command.env_remove("GITHUB_ACTIONS").env_remove("GITLAB_CI");
+        if provider == "github" {
+            command
+                .env("GITHUB_ACTIONS", "true")
+                .env("GITHUB_RUN_ID", "123");
+        } else {
+            command
+                .env("GITLAB_CI", "true")
+                .env("CI_PIPELINE_ID", "456");
+        }
+        command
+            .current_dir(workspace.path())
+            .args([
+                "run",
+                "--wrap",
+                "--name",
+                "build",
+                "--input",
+                "input",
+                "--output",
+                "output",
+                "--",
+                "bash",
+                "-c",
+                "cp input output",
+            ])
+            .assert()
+            .success();
+        let receipt = only_receipt(workspace.path());
+        let provenance = receipt.provenance.as_ref().unwrap();
+        assert_eq!(provenance.ci.as_ref().unwrap().provider, provider);
+        assert!(matches!(
+            provenance.execution,
+            Some(attest::storage::ExecutionDescriptor::Wrapped { .. })
+        ));
+        let path = workspace.path().join("delivered.yaml");
+        std::fs::write(&path, serde_yaml::to_string(&receipt).unwrap()).unwrap();
+        recompute_json(workspace.path(), &path, true, 0);
+    }
+}
+
+#[test]
+fn changed_wrapped_inputs_preserve_a_failed_build_exit_and_restore_permissions() {
+    let workspace = tempfile::tempdir().unwrap();
+    let input = workspace.path().join("input");
+    std::fs::write(&input, "original").unwrap();
+    let before = std::fs::metadata(&input).unwrap().permissions();
+    attest_cmd()
+        .current_dir(workspace.path())
+        .args([
+            "run",
+            "--wrap",
+            "--name",
+            "rewrite",
+            "--input",
+            "input",
+            "--report",
+            "report.json",
+            "--",
+            "sh",
+            "-c",
+            "chmod u+w input; printf changed > input; exit 23",
+        ])
+        .assert()
+        .code(23);
+    assert_eq!(std::fs::metadata(input).unwrap().permissions(), before);
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(workspace.path().join("report.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["build_exit_code"], 23);
+    assert_eq!(report["evidence_status"], "failed");
+    assert!(report["receipt"].is_null());
+    assert!(report["error"]
+        .as_str()
+        .unwrap()
+        .contains("modified its own declared inputs"));
+}

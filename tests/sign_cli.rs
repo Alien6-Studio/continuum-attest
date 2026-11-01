@@ -227,3 +227,50 @@ fn sign_refuses_a_receipt_the_verifier_would_refuse() {
         "a refused receipt is left unsigned"
     );
 }
+
+#[test]
+fn timestamp_failure_preserves_existing_signature_without_private_key_access() {
+    let dir = workspace();
+    generate(dir.path(), "release");
+    attest()
+        .current_dir(dir.path())
+        .args(["run", "--sign"])
+        .assert()
+        .success();
+    let receipt = receipt_in(dir.path());
+    let original = std::fs::read(&receipt).unwrap();
+    std::fs::remove_dir_all(dir.path().join(".attest/keys")).unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("timestamp")
+        .arg(&receipt)
+        .args(["--tsa", "http://127.0.0.1:1"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("timestamping failed"));
+    assert_eq!(std::fs::read(&receipt).unwrap(), original);
+    let mut invalid: attest::storage::Receipt = serde_yaml::from_slice(&original).unwrap();
+    invalid.steps[0].output_hash = "f".repeat(64);
+    std::fs::write(&receipt, serde_yaml::to_string(&invalid).unwrap()).unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("timestamp")
+        .arg(&receipt)
+        .args(["--tsa", "http://127.0.0.1:1"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("signature does not verify"));
+    let mut timestamped: attest::storage::Receipt = serde_yaml::from_slice(&original).unwrap();
+    timestamped.timestamp_token = Some("existing-token".into());
+    let preserved = serde_yaml::to_string(&timestamped).unwrap();
+    std::fs::write(&receipt, &preserved).unwrap();
+    attest()
+        .current_dir(dir.path())
+        .arg("timestamp")
+        .arg(&receipt)
+        .args(["--tsa", "http://127.0.0.1:1"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("already carries a timestamp"));
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), preserved);
+}

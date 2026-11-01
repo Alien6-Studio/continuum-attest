@@ -63,10 +63,12 @@ Implementation: [CI adoption guide](docs/ci-adoption.md), GitHub composite
 action, GitLab component, `run --wrap --report`, `identity sign`, and
 `evidence pack|verify`. Local tests exercise artifact substitution, missing
 trust, unauthorized workflow evidence and build/evidence failure separation.
-The release workflow checks the local-key producer/recipient handoff with
-network access disabled for verification. Real GitHub and GitLab provider
-jobs, followed by verification on a network-disabled machine, remain the
-acceptance criterion for the complete workflow-identity adoption scenario.
+The release workflow checks fresh GitHub workflow identity in a transferred
+producer/recipient handoff with network access disabled for verification.
+The real GitLab job remains a release acceptance gate; local runner tests do
+not replace provider-issued identity evidence. Publishing 0.3.0 did not
+complete this milestone. Remaining criteria are implemented and validated
+against the original tickets before the corrective release is accepted.
 
 **Outcome:** a team can attest one existing build job and hand its output to
 a recipient without migrating its pipeline to Attest.

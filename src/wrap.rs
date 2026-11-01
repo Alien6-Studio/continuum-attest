@@ -38,6 +38,12 @@ use crate::storage::{write_receipt_unique, Receipt, StepResult, Storage};
 /// Domain-separation prefix for the wrap-mode pipeline hash.
 const WRAP_PIPELINE_DOMAIN: &str = "attest-wrap/v1";
 
+pub(crate) fn pipeline_hash(canonical_command: &str) -> String {
+    blake3::hash(format!("{WRAP_PIPELINE_DOMAIN}\n{canonical_command}").as_bytes())
+        .to_hex()
+        .to_string()
+}
+
 /// Captured stream size limit; CI logs can be arbitrarily large and are
 /// already persisted by the CI system itself, so the receipt records at
 /// most this many bytes per stream with an explicit truncation marker.
@@ -136,6 +142,9 @@ fn run_wrap_inner(
     let run_string = serde_json::to_string(command).context("cannot encode the wrapped command")?;
     let mut provenance =
         crate::provenance::collect(&options.workspace, Some(options.name.clone()), false);
+    provenance.execution = Some(crate::storage::ExecutionDescriptor::Wrapped {
+        command: command.to_vec(),
+    });
     provenance.steps.push(crate::provenance::step(
         &options.name,
         &run_string,
@@ -148,6 +157,8 @@ fn run_wrap_inner(
         eprintln!("warning: no inputs declared; attestation covers command string only");
     }
 
+    let guard = crate::executor::InputGuard::hold(&options.workspace, &options.inputs)?;
+    let input_permissions_held = guard.enforced();
     let input_hash = match crate::hashing::hash_inputs(
         &options.workspace,
         &options.name,
@@ -195,6 +206,27 @@ fn run_wrap_inner(
     let duration_secs = started.elapsed().as_secs();
     let exit_code = exit_code_of(&status);
     report.build_exit_code = Some(exit_code);
+    drop(guard);
+
+    // The same guard and after-execution check as a native local step:
+    // a successful command must not leave a receipt for different inputs.
+    let unchanged = (|| -> Result<()> {
+        let inputs_after = crate::hashing::hash_inputs(
+            &options.workspace,
+            &options.name,
+            &run_string,
+            &options.inputs,
+        )?;
+        if inputs_after != input_hash {
+            anyhow::bail!("wrapped command modified its own declared inputs while running");
+        }
+        Ok(())
+    })();
+    if let Err(error) = unchanged {
+        eprintln!("error: attestation failed: {error:#}");
+        report.error = Some(format!("{error:#}"));
+        return Ok(if exit_code == 0 { 1 } else { exit_code });
+    }
 
     let (output_hash, artifacts) = match crate::hashing::outputs_with_artifacts(
         &options.workspace,
@@ -219,9 +251,7 @@ fn run_wrap_inner(
     provenance.artifacts = artifacts;
     let mut receipt = Receipt {
         schema_version: Some(crate::storage::RECEIPT_SCHEMA_VERSION),
-        pipeline_hash: blake3::hash(format!("{WRAP_PIPELINE_DOMAIN}\n{run_string}").as_bytes())
-            .to_hex()
-            .to_string(),
+        pipeline_hash: pipeline_hash(&run_string),
         steps: vec![StepResult {
             name: options.name.clone(),
             input_hash,
@@ -243,7 +273,7 @@ fn run_wrap_inner(
         reproducibility: None,
         provenance: Some(provenance),
         timestamp_token: None,
-        isolation: None,
+        isolation: Some(wrapped_isolation(input_permissions_held)),
     };
 
     if options.sign {
@@ -283,6 +313,21 @@ fn run_wrap_inner(
     report.evidence_status = "produced".into();
 
     Ok(exit_code)
+}
+
+fn wrapped_isolation(input_permissions_held: bool) -> crate::sandbox::IsolationReport {
+    let mut report = crate::sandbox::unisolated_report(false);
+    report.controls.push(crate::sandbox::IsolationControl {
+        name: "inputs".into(),
+        status: crate::sandbox::ControlStatus::NotEnforced,
+        detail: if input_permissions_held {
+            "declared inputs held read-only and rehashed after execution; the same user can restore write permissions, so transient changes are not prevented"
+        } else {
+            "declared inputs rehashed after execution; permission guard unavailable or ineffective for root, so transient changes are not prevented"
+        }
+        .into(),
+    });
+    report
 }
 
 /// Forward a child stream to the parent stream while capturing up to

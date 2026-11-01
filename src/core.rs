@@ -998,6 +998,52 @@ pub fn sign_receipt_file(
     Ok(0)
 }
 
+/// Attach time evidence without reissuing the original signature or loading
+/// a private key. Failure leaves the signed receipt byte-for-byte intact.
+pub fn timestamp_receipt_file(
+    receipt_path: &std::path::Path,
+    tsa: &str,
+    output: Option<&std::path::Path>,
+) -> Result<i32> {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let bytes =
+        crate::verify::read_bounded(receipt_path, crate::verify::MAX_RECEIPT_BYTES, "receipt")?;
+    let mut receipt: crate::storage::Receipt = serde_yaml::from_slice(&bytes)?;
+    if receipt.timestamp_token.is_some() {
+        eprintln!("error: receipt already carries a timestamp; it will not be replaced");
+        return Ok(1);
+    }
+    let (Some(signature), Some(key)) = (&receipt.signature, &receipt.signer_public_key) else {
+        eprintln!("error: timestamp requires an existing receipt signature");
+        return Ok(1);
+    };
+    if !crate::crypto::sign::verify_with_public_key(
+        key,
+        crate::storage::receipt_signing_bytes(&receipt)?.as_bytes(),
+        signature,
+    )? {
+        eprintln!("error: existing receipt signature does not verify");
+        return Ok(1);
+    }
+    let imprint = crate::crypto::timestamp::signature_imprint(signature)?;
+    let token =
+        crate::crypto::timestamp::request_token(tsa, &imprint, std::time::Duration::from_secs(30))?;
+    receipt.timestamp_token = Some(base64::engine::general_purpose::STANDARD.encode(token));
+    let destination = output.unwrap_or(receipt_path);
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(serde_yaml::to_string(&receipt)?.as_bytes())?;
+    temporary
+        .persist(destination)
+        .map_err(|error| error.error)?;
+    println!("{}", destination.display());
+    Ok(0)
+}
+
 /// A failure here fails the run. Someone who passed `--timestamp` wants
 /// third-party evidence of when they signed; quietly handing them a receipt
 /// without it would leave them believing they have a guarantee they do not.

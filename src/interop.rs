@@ -13,15 +13,15 @@
 //! for a given receipt and signing key (Ed25519 signatures are
 //! deterministic).
 //!
-//! Deviations from the issue-#13 mapping table (which was written against
-//! the legacy `src/storage/receipt.rs` schema) are documented inline: the
-//! persisted receipt has no `id` (invocationId is derived from the
-//! canonical receipt content hash) and a single completion `timestamp`
-//! (startedOn is derived by subtracting `total_duration_secs`).
+//! The v2 projection keeps the exact original receipt and its trust context
+//! in an explicit extension. Import verifies DSSE and native receipt trust
+//! separately, using only the recipient's independently configured anchors.
+//! The public build-type document defines the mapping and its limitations.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,20 @@ use crate::verify::{Check, CheckStatus, ReceiptVerdict};
 pub const DSSE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 pub const PREDICATE_TYPE: &str = "https://slsa.dev/provenance/v1";
-pub const BUILD_TYPE: &str = "https://alien6.com/attest/pipeline/v1";
+pub const BUILD_TYPE: &str = "https://github.com/Alien6-Studio/continuum-attest/blob/main/docs/specifications/attest-pipeline-v2.md";
+pub const LEGACY_BUILD_TYPE: &str = "https://alien6.com/attest/pipeline/v1";
+pub const UNKNOWN_BUILDER: &str = "urn:attest:builder:unverified";
+const EVIDENCE_FORMAT: &str = "attest-original-evidence/v1";
+
+#[derive(Debug, Serialize)]
+pub struct InteropOutcome {
+    pub projection: bool,
+    pub envelope_signer: Option<String>,
+    pub original_signer: Option<String>,
+    pub original_receipt_sha256: Option<String>,
+    pub original_verdict: Option<Box<ReceiptVerdict>>,
+    pub semantics: Vec<String>,
+}
 
 // ---------------------------------------------------------------------------
 // Wire format. Field declaration order == byte-lexicographic order of the
@@ -76,10 +89,78 @@ pub struct Digest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Predicate {
+    #[serde(
+        default,
+        rename = "attest_evidence",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attest: Option<OriginalEvidence>,
     #[serde(rename = "buildDefinition")]
     pub build_definition: BuildDefinition,
     #[serde(rename = "runDetails")]
     pub run_details: RunDetails,
+}
+
+/// An explicit projection with the original evidence kept byte-for-byte.
+/// The transported trust files are provenance, never recipient trust anchors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OriginalEvidence {
+    pub artifact_binding: String,
+    pub format: String,
+    pub original_signer: Option<String>,
+    pub producer: EvidenceProducer,
+    pub receipt: EmbeddedBlob,
+    pub semantics: Vec<String>,
+    pub trust_material: BTreeMap<String, EmbeddedBlob>,
+    pub workflow: Option<crate::identity::IdentityVerification>,
+    pub workflow_bundle: Option<EmbeddedBlob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EvidenceProducer {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct EmbeddedBlob {
+    pub content: String,
+    pub media_type: String,
+    pub sha256: String,
+}
+
+impl EmbeddedBlob {
+    fn new(bytes: &[u8], media_type: &str) -> Self {
+        Self {
+            content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            media_type: media_type.into(),
+            sha256: sha256(bytes),
+        }
+    }
+
+    fn bytes(&self, limit: u64) -> Result<Vec<u8>> {
+        ensure!(
+            self.content.len() as u64 <= limit.saturating_mul(4) / 3 + 4,
+            "embedded evidence exceeds size limit"
+        );
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&self.content)?;
+        ensure!(
+            bytes.len() as u64 <= limit,
+            "embedded evidence exceeds size limit"
+        );
+        ensure!(
+            sha256(&bytes) == self.sha256,
+            "embedded evidence SHA-256 does not match its bytes"
+        );
+        Ok(bytes)
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    hex::encode(ring::digest::digest(&ring::digest::SHA256, bytes))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +174,7 @@ pub struct BuildDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalParameters {
     #[serde(rename = "pipelineHash")]
     pub pipeline_hash: String,
@@ -132,6 +214,9 @@ pub struct ExportOptions {
     pub key: Option<String>,
     /// Workspace root holding `.attest/keys`.
     pub workspace: PathBuf,
+    pub identity_bundle: Option<PathBuf>,
+    pub identity_policy: Option<crate::identity::IdentityPolicy>,
+    pub trust_store: Option<PathBuf>,
 }
 
 /// Outcome of an export attempt. Preconditions that must fail the command
@@ -152,56 +237,115 @@ pub enum ExportOutcome {
     NoSigningKey(String),
 }
 
-/// Map a persisted receipt to the in-toto/SLSA statement.
+/// Construct a projection from a receipt's signed file inventory. Export also
+/// verifies the actual files; this pure mapping alone does not verify artifacts.
 pub fn statement_from_receipt(receipt: &Receipt) -> Result<Statement> {
-    let mut steps: Vec<&crate::storage::StepResult> = receipt.steps.iter().collect();
-    steps.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let subject = steps
-        .iter()
-        .map(|step| ResourceDescriptor {
-            digest: Digest {
-                blake3: step.output_hash.clone(),
+    let bytes = serde_yaml::to_string(receipt)?;
+    project_receipt(
+        receipt,
+        OriginalEvidence {
+            artifact_binding: artifact_binding(receipt).into(),
+            format: EVIDENCE_FORMAT.into(),
+            original_signer: receipt.signer_public_key.clone(),
+            producer: EvidenceProducer {
+                name: "continuum-attest".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
             },
-            name: step.name.clone(),
+            receipt: EmbeddedBlob::new(bytes.as_bytes(), "application/yaml"),
+            semantics: projection_semantics(),
+            trust_material: BTreeMap::new(),
+            workflow: None,
+            workflow_bundle: None,
+        },
+    )
+}
+
+fn projection_semantics() -> Vec<String> {
+    [
+        "projection: the original receipt is authoritative for Attest verification",
+        "receipt-signature and RFC3161 timestamp are carried in the original receipt",
+        "trust-material is producer-supplied context, never recipient authorization",
+        "step manifests, causal references, isolation, reproducibility and source observations are carried only in the original receipt",
+        "external causal objects, capsule manifests, source files and artifact bytes are omitted and require separately delivered evidence",
+        "resolvedDependencies is empty: input manifests are not individual resource digests",
+        "symlinks are carried in the original inventory but are not file-digest subjects",
+        "workflow identifies the authorizing signing workflow, not runner integrity or build correctness",
+        "no separate artifact signature is asserted",
+        "startedOn is derived from the producer-reported completion and duration, not trusted time",
+    ].into_iter().map(String::from).collect()
+}
+
+fn artifact_binding(receipt: &Receipt) -> &'static str {
+    if receipt
+        .provenance
+        .as_ref()
+        .is_some_and(|p| !p.artifacts.is_empty())
+    {
+        "signed-file-inventory"
+    } else {
+        "unavailable"
+    }
+}
+
+fn project_receipt(receipt: &Receipt, evidence: OriginalEvidence) -> Result<Statement> {
+    let mut subjects = BTreeMap::new();
+    if artifact_binding(receipt) != "unavailable" {
+        crate::evidence::inventory(receipt)?;
+        for artifact in &receipt
+            .provenance
+            .as_ref()
+            .context("missing artifact inventory")?
+            .artifacts
+        {
+            if artifact.kind != "file" {
+                continue;
+            }
+            if let Some(previous) = subjects.insert(artifact.path.clone(), artifact.digest.clone())
+            {
+                ensure!(
+                    previous == artifact.digest,
+                    "one artifact path has conflicting digests"
+                );
+            }
+        }
+    }
+    let subject = subjects
+        .into_iter()
+        .map(|(name, blake3)| ResourceDescriptor {
+            name,
+            digest: Digest { blake3 },
         })
         .collect();
-    let resolved_dependencies = steps
-        .iter()
-        .map(|step| ResourceDescriptor {
-            digest: Digest {
-                blake3: step.input_hash.clone(),
-            },
-            name: step.name.clone(),
-        })
-        .collect();
-
-    // The persisted receipt has no `id`; the invocation id is the blake3
-    // hash of the canonical signing bytes, i.e. content-derived and stable.
-    let invocation_id = blake3::hash(receipt_signing_bytes(receipt)?.as_bytes())
-        .to_hex()
-        .to_string();
+    let invocation_id = evidence.receipt.sha256.clone();
+    let builder = evidence
+        .workflow
+        .as_ref()
+        .map(|identity| identity.workflow.clone())
+        .unwrap_or_else(|| UNKNOWN_BUILDER.into());
 
     // `timestamp` records completion; startedOn is derived.
     let finished = receipt.timestamp;
+    let duration =
+        i64::try_from(receipt.total_duration_secs).context("total_duration_secs out of range")?;
     let started = finished
-        - chrono::Duration::try_seconds(receipt.total_duration_secs as i64)
-            .context("total_duration_secs out of range")?;
+        .checked_sub_signed(
+            chrono::Duration::try_seconds(duration).context("total_duration_secs out of range")?,
+        )
+        .context("derived start time is out of range")?;
 
     Ok(Statement {
         type_: STATEMENT_TYPE.to_string(),
         predicate: Predicate {
+            attest: Some(evidence),
             build_definition: BuildDefinition {
                 build_type: BUILD_TYPE.to_string(),
                 external_parameters: ExternalParameters {
                     pipeline_hash: receipt.pipeline_hash.clone(),
                 },
-                resolved_dependencies,
+                resolved_dependencies: Vec::new(),
             },
             run_details: RunDetails {
-                builder: Builder {
-                    id: format!("https://alien6.com/attest@v{}", receipt.attest_version),
-                },
+                builder: Builder { id: builder },
                 metadata: RunMetadata {
                     finished_on: rfc3339(finished),
                     invocation_id,
@@ -234,9 +378,10 @@ pub fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
 
 /// Export one receipt file as a signed DSSE envelope.
 pub fn export_receipt_file(receipt_path: &Path, options: &ExportOptions) -> Result<ExportOutcome> {
-    let content = std::fs::read_to_string(receipt_path)
-        .with_context(|| format!("cannot read receipt file: {}", receipt_path.display()))?;
-    let receipt: Receipt = serde_yaml::from_str(&content)
+    let content =
+        crate::verify::read_bounded(receipt_path, crate::verify::MAX_RECEIPT_BYTES, "receipt")
+            .with_context(|| format!("cannot read receipt file: {}", receipt_path.display()))?;
+    let receipt: Receipt = serde_yaml::from_slice(&content)
         .with_context(|| format!("invalid receipt: {}", receipt_path.display()))?;
 
     // Never export a receipt whose own signature is broken.
@@ -266,7 +411,88 @@ pub fn export_receipt_file(receipt_path: &Path, options: &ExportOptions) -> Resu
     }
 
     let mut warnings: Vec<String> = Vec::new();
-    let statement = statement_from_receipt(&receipt)?;
+    if artifact_binding(&receipt) != "unavailable" {
+        crate::evidence::inventory(&receipt)?;
+        for artifact in &receipt
+            .provenance
+            .as_ref()
+            .context("missing artifact inventory")?
+            .artifacts
+        {
+            let bytes = crate::evidence::artifact_bytes(&options.workspace, artifact)?;
+            ensure!(
+                blake3::hash(&bytes).to_hex().as_str() == artifact.digest,
+                "artifact {} differs from the original receipt",
+                artifact.path
+            );
+        }
+    } else {
+        warnings.push("original receipt has no signed file inventory; artifact binding is unavailable and subject is empty".into());
+    }
+    ensure!(
+        options.identity_bundle.is_some() == options.identity_policy.is_some(),
+        "workflow export requires both --identity-bundle and --identity-policy"
+    );
+    let (workflow, workflow_bundle) = match (&options.identity_bundle, &options.identity_policy) {
+        (Some(path), Some(policy)) => {
+            let bytes = crate::verify::read_bounded(
+                path,
+                crate::identity::MAX_IDENTITY_BYTES,
+                "workflow identity",
+            )?;
+            // Verify the exact snapshots that will be transported, not paths
+            // the exporting process or another process could replace later.
+            let scratch = tempfile::tempdir()?;
+            let original_path = scratch.path().join("receipt.yaml");
+            let bundle_path = scratch.path().join("identity.json");
+            std::fs::write(&original_path, &content)?;
+            std::fs::write(&bundle_path, &bytes)?;
+            let verified =
+                crate::identity::verify_receipt_identity(&original_path, &bundle_path, policy)?;
+            (
+                Some(verified),
+                Some(EmbeddedBlob::new(
+                    &bytes,
+                    "application/vnd.dev.sigstore.bundle.v0.3+json",
+                )),
+            )
+        }
+        _ => (None, None),
+    };
+    let trust_dir = options
+        .trust_store
+        .clone()
+        .unwrap_or_else(|| options.workspace.join(".attest/trust"));
+    let mut trust_material = public_trust_snapshot(&trust_dir)?;
+    if let Some(policy) = &options.identity_policy {
+        let root = crate::verify::read_bounded(
+            &policy.trusted_root,
+            crate::identity::MAX_IDENTITY_BYTES,
+            "Sigstore trusted root",
+        )?;
+        trust_material.insert(
+            "sigstore-trusted-root.json".into(),
+            EmbeddedBlob::new(&root, "application/json"),
+        );
+    }
+    let statement = project_receipt(
+        &receipt,
+        OriginalEvidence {
+            artifact_binding: artifact_binding(&receipt).into(),
+            format: EVIDENCE_FORMAT.into(),
+            original_signer: receipt.signer_public_key.clone(),
+            producer: EvidenceProducer {
+                name: "continuum-attest".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+            receipt: EmbeddedBlob::new(&content, "application/yaml"),
+            semantics: projection_semantics(),
+            trust_material,
+            workflow,
+            workflow_bundle,
+        },
+    )?;
+    warnings.push("in-toto/SLSA is a projection; original receipt and public trust context are carried in predicate.attest_evidence; recipient trust must be configured independently".into());
     if statement.subject.is_empty() {
         warnings.push("receipt declares no step outputs; exported subject is empty".to_string());
     }
@@ -342,7 +568,62 @@ pub fn export_receipt_file(receipt_path: &Path, options: &ExportOptions) -> Resu
     };
     let mut json = serde_json::to_string(&envelope).context("cannot serialize envelope")?;
     json.push('\n');
+    ensure!(
+        json.len() as u64 <= MAX_STATEMENT_BYTES,
+        "exported envelope exceeds the supported statement size limit"
+    );
     Ok(ExportOutcome::Written { json, warnings })
+}
+
+fn public_trust_snapshot(root: &Path) -> Result<BTreeMap<String, EmbeddedBlob>> {
+    let mut files = BTreeMap::new();
+    let mut total = 0usize;
+    for directory in ["", "tsa", "bundles"] {
+        let path = root.join(directory);
+        if !path.exists() {
+            continue;
+        }
+        ensure!(
+            !path.symlink_metadata()?.is_symlink(),
+            "public trust directory is a symlink"
+        );
+        for entry in std::fs::read_dir(&path)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let selected = match directory {
+                "" => name == "trust.toml" || name.ends_with(".pub"),
+                "tsa" => [".crt", ".pem", ".der"]
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix)),
+                "bundles" => name.ends_with(".json"),
+                _ => false,
+            };
+            if !selected {
+                continue;
+            }
+            ensure!(
+                entry.file_type()?.is_file(),
+                "public trust material is not a regular file"
+            );
+            let bytes =
+                crate::verify::read_bounded(&entry.path(), 1024 * 1024, "public trust material")?;
+            total += bytes.len();
+            ensure!(
+                total <= 4 * 1024 * 1024 && files.len() < 256,
+                "public trust snapshot exceeds size limit"
+            );
+            let relative = if directory.is_empty() {
+                name
+            } else {
+                format!("{directory}/{name}")
+            };
+            files.insert(
+                relative,
+                EmbeddedBlob::new(&bytes, "application/octet-stream"),
+            );
+        }
+    }
+    Ok(files)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +648,8 @@ pub struct ImportOptions {
     pub trust_statement_time: bool,
     /// What the caller requires; the same names as `attest verify`.
     pub policy: crate::verify::Policy,
+    pub identity_policy: Option<crate::identity::IdentityPolicy>,
+    pub artifact_root: Option<PathBuf>,
 }
 
 fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
@@ -386,60 +669,322 @@ fn check(name: &str, status: CheckStatus, detail: impl Into<String>) -> Check {
 pub const MAX_STATEMENT_BYTES: u64 = 16 * 1024 * 1024;
 
 pub fn import_statement_file(path: &Path, options: &ImportOptions) -> Result<ReceiptVerdict> {
+    let mut effective_policy = options.policy.clone();
+    if options.identity_policy.is_some()
+        && !effective_policy
+            .required
+            .contains(&crate::verify::Requirement::Identity)
+    {
+        effective_policy
+            .required
+            .push(crate::verify::Requirement::Identity);
+    }
     let display_path = path.display().to_string();
     let content = crate::verify::read_bounded(path, MAX_STATEMENT_BYTES, "statement")
         .with_context(|| format!("cannot read statement file: {}", display_path))?;
     let value: serde_json::Value = serde_json::from_slice(&content)
         .with_context(|| format!("unreadable JSON in {}", display_path))?;
 
-    let mut checks: Vec<Check> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    let mut signed_by: Option<String> = None;
-
-    // 1. schema — envelope shape, payload decoding, statement shape.
-    let parsed = parse_envelope(&value);
-    match &parsed {
-        Ok(_) => checks.push(check(
-            "schema",
-            CheckStatus::Pass,
-            "DSSE envelope and in-toto statement match schema",
-        )),
-        Err(detail) => checks.push(check("schema", CheckStatus::Fail, detail.clone())),
-    }
-
-    if let Ok((envelope, payload, statement)) = parsed {
-        // 2. consistency — mapped fields are well-formed.
-        checks.push(consistency_check(&statement));
-
-        // 3. signature — DSSE signature against the #6 trust store.
-        let (sig_check, key) =
-            signature_check(&envelope, &payload, &statement, options, &mut warnings);
-        checks.push(sig_check);
-        signed_by = key;
-    } else {
-        for name in ["consistency", "signature"] {
-            checks.push(check(name, CheckStatus::Skipped, "schema check failed"));
-        }
-    }
-
-    let verdict = if checks.iter().any(|c| c.status == CheckStatus::Fail) {
-        "fail"
-    } else {
-        "pass"
-    };
-
     let mut verdict = ReceiptVerdict {
         receipt: display_path,
-        verdict: verdict.to_string(),
-        checks,
-        signed_by,
-        warnings,
+        verdict: "fail".into(),
+        checks: Vec::new(),
+        signed_by: None,
+        warnings: Vec::new(),
         trust_material: None,
         execution: None,
         policy: None,
+        identity: options
+            .identity_policy
+            .as_ref()
+            .map(|policy| crate::identity::IdentityOutcome {
+                required: Some(policy.clone()),
+                verified: None,
+                principals: crate::identity::IdentityPrincipals {
+                    evidence_producer: None,
+                    workflow: None,
+                    artifact_signer: None,
+                },
+            }),
+        interop: None,
     };
-    crate::verify::apply_policy(&mut verdict, &options.policy);
+    let (envelope, payload, statement) = match parse_envelope(&value) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            verdict
+                .checks
+                .push(check("schema", CheckStatus::Fail, error));
+            crate::verify::apply_policy(&mut verdict, &effective_policy);
+            return Ok(verdict);
+        }
+    };
+    verdict.checks.push(check(
+        "schema",
+        CheckStatus::Pass,
+        "DSSE envelope and in-toto statement match schema",
+    ));
+    verdict.checks.push(consistency_check(&statement));
+    let (mut dsse, signer) = signature_check(
+        &envelope,
+        &payload,
+        &statement,
+        options,
+        &mut verdict.warnings,
+    );
+    let envelope_passed = dsse.status == CheckStatus::Pass;
+    dsse.name = "dsse-signature".into();
+    verdict.checks.push(dsse);
+    verdict.signed_by = signer.clone();
+    verdict.interop = Some(InteropOutcome {
+        projection: true,
+        envelope_signer: signer,
+        original_signer: None,
+        original_receipt_sha256: None,
+        original_verdict: None,
+        semantics: projection_semantics(),
+    });
+    let original_passed = if statement.predicate.build_definition.build_type == BUILD_TYPE {
+        match verify_original_projection(&statement, options, &mut verdict) {
+            Ok(passed) => passed,
+            Err(error) => {
+                verdict.checks.push(check(
+                    "original-evidence",
+                    CheckStatus::Fail,
+                    format!("{error:#}"),
+                ));
+                false
+            }
+        }
+    } else {
+        verdict.warnings.push("legacy projection: only the DSSE envelope is verified; original receipt signer, trusted time, workflow, artifact bytes and Attest trust semantics are unavailable".into());
+        verdict.checks.push(check(
+            "original-evidence",
+            CheckStatus::Skipped,
+            "legacy projection carries no original receipt",
+        ));
+        verdict.checks.push(check(
+            "artifacts",
+            CheckStatus::Skipped,
+            "legacy step manifest digests do not identify artifact bytes",
+        ));
+        verdict.checks.push(check(
+            "identity",
+            if options.identity_policy.is_some() {
+                CheckStatus::Fail
+            } else {
+                CheckStatus::Skipped
+            },
+            "legacy projection carries no workflow identity evidence",
+        ));
+        // Retain historical DSSE verification, explicitly bounded above. It
+        // never satisfies requirements for properties the legacy format lost.
+        true
+    };
+    verdict.checks.push(check(
+        "signature",
+        if envelope_passed && original_passed {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
+        if statement.predicate.build_definition.build_type == BUILD_TYPE {
+            "requires both trusted DSSE signature and independently trusted original receipt"
+        } else {
+            "legacy DSSE envelope signature only; original receipt trust is unavailable"
+        },
+    ));
+    crate::verify::apply_policy(&mut verdict, &effective_policy);
     Ok(verdict)
+}
+
+fn verify_original_projection(
+    statement: &Statement,
+    options: &ImportOptions,
+    verdict: &mut ReceiptVerdict,
+) -> Result<bool> {
+    let evidence = statement
+        .predicate
+        .attest
+        .as_ref()
+        .context("v2 projection is missing original evidence")?;
+    ensure!(
+        evidence.format == EVIDENCE_FORMAT,
+        "unsupported original evidence format"
+    );
+    ensure!(
+        evidence.receipt.media_type == "application/yaml",
+        "unsupported original receipt media type"
+    );
+    ensure!(
+        evidence.semantics == projection_semantics(),
+        "projection must explicitly preserve its trust and omission semantics"
+    );
+    ensure!(
+        !evidence.producer.name.is_empty() && !evidence.producer.version.is_empty(),
+        "missing evidence producer tool identity"
+    );
+    let receipt_bytes = evidence.receipt.bytes(crate::verify::MAX_RECEIPT_BYTES)?;
+    let receipt: Receipt = serde_yaml::from_slice(&receipt_bytes)?;
+    ensure!(
+        evidence.original_signer == receipt.signer_public_key,
+        "original signer identity differs from the original receipt"
+    );
+    ensure!(
+        evidence.artifact_binding == artifact_binding(&receipt),
+        "artifact binding claim differs from the original receipt"
+    );
+    ensure!(
+        evidence.workflow.is_some() == evidence.workflow_bundle.is_some(),
+        "workflow claims require their original cryptographic evidence"
+    );
+    // Check all transported material's content references, but never install it
+    // into the recipient's trust store or use it as verification authority.
+    ensure!(
+        evidence.trust_material.len() <= 257,
+        "too many transported trust files"
+    );
+    for blob in evidence.trust_material.values() {
+        blob.bytes(crate::identity::MAX_IDENTITY_BYTES)?;
+    }
+    let expected = project_receipt(&receipt, evidence.clone())?;
+    ensure!(
+        serde_json::to_value(statement)? == serde_json::to_value(expected)?,
+        "SLSA projection does not match its original receipt and workflow claims"
+    );
+    let original = crate::verify::verify_receipt_bytes(
+        &receipt_bytes,
+        "embedded original receipt",
+        &crate::verify::VerifyOptions {
+            check_signatures: true,
+            recompute: false,
+            workspace: options.workspace.clone(),
+            trust_store: options.trust_store.clone(),
+            trust_receipt_timestamp: false,
+            policy: crate::verify::Policy {
+                required: vec![crate::verify::Requirement::Signature],
+            },
+        },
+    )?;
+    let passed = original.passed();
+    let original_signer = original.signed_by.clone();
+    verdict.checks.push(check("original-evidence", if passed { CheckStatus::Pass } else { CheckStatus::Fail }, "original receipt verified independently against recipient trust; see interop.original_verdict"));
+    if let Some(timestamp) = original.checks.iter().find(|c| c.name == "timestamp") {
+        verdict.checks.push(check(
+            "timestamp",
+            timestamp.status,
+            timestamp.detail.clone(),
+        ));
+    }
+    if let Some(execution) = &original.execution {
+        verdict.execution = Some(crate::verify::ExecutionOutcome {
+            outcome: execution.outcome.clone(),
+            failed_steps: execution.failed_steps,
+        });
+    }
+    if let Some(trust) = &original.trust_material {
+        verdict.trust_material = Some(crate::verify::TrustMaterial {
+            state: trust.state.clone(),
+            issuer: trust.issuer.clone(),
+            sequence: trust.sequence,
+            valid_until: trust.valid_until,
+            judged_by: trust.judged_by.clone(),
+        });
+    }
+    let mut verified = None;
+    if let Some(policy) = &options.identity_policy {
+        let result = (|| -> Result<crate::identity::IdentityVerification> {
+            let bundle = evidence
+                .workflow_bundle
+                .as_ref()
+                .context("required workflow identity evidence is missing")?;
+            let bytes = bundle.bytes(crate::identity::MAX_IDENTITY_BYTES)?;
+            let scratch = tempfile::tempdir()?;
+            let receipt_path = scratch.path().join("receipt.yaml");
+            let bundle_path = scratch.path().join("bundle.json");
+            std::fs::write(&receipt_path, &receipt_bytes)?;
+            std::fs::write(&bundle_path, bytes)?;
+            let authenticated =
+                crate::identity::verify_receipt_identity(&receipt_path, &bundle_path, policy)?;
+            ensure!(
+                serde_json::to_value(&authenticated)? == serde_json::to_value(&evidence.workflow)?,
+                "projected workflow identity differs from the authenticated certificate"
+            );
+            Ok(authenticated)
+        })();
+        match result {
+            Ok(identity) => {
+                verified = Some(identity);
+                verdict.checks.push(check(
+                    "identity",
+                    CheckStatus::Pass,
+                    "original receipt workflow matches independent recipient policy",
+                ));
+            }
+            Err(error) => {
+                verdict
+                    .checks
+                    .push(check("identity", CheckStatus::Fail, format!("{error:#}")))
+            }
+        }
+    } else {
+        verdict.checks.push(check(
+            "identity",
+            CheckStatus::Skipped,
+            "no recipient identity policy; projected builder workflow is not approved",
+        ));
+    }
+    verdict.identity = Some(crate::identity::IdentityOutcome {
+        required: options.identity_policy.clone(),
+        principals: crate::identity::IdentityPrincipals {
+            evidence_producer: original_signer.clone(),
+            workflow: verified.as_ref().map(|i| i.workflow.clone()),
+            artifact_signer: None,
+        },
+        verified,
+    });
+    if let Some(root) = &options.artifact_root {
+        let result = (|| -> Result<()> {
+            ensure!(
+                artifact_binding(&receipt) != "unavailable",
+                "original receipt has no signed file inventory"
+            );
+            for artifact in &receipt
+                .provenance
+                .as_ref()
+                .context("missing artifact inventory")?
+                .artifacts
+            {
+                let bytes = crate::evidence::artifact_bytes(root, artifact)?;
+                ensure!(
+                    blake3::hash(&bytes).to_hex().as_str() == artifact.digest,
+                    "delivered artifact {} differs from original receipt",
+                    artifact.path
+                );
+            }
+            Ok(())
+        })();
+        verdict.checks.push(match result {
+            Ok(()) => check(
+                "artifacts",
+                CheckStatus::Pass,
+                "delivered bytes match the original signed file inventory",
+            ),
+            Err(error) => check("artifacts", CheckStatus::Fail, format!("{error:#}")),
+        });
+    } else {
+        verdict.checks.push(check(
+            "artifacts",
+            CheckStatus::Skipped,
+            "artifact bytes were not provided; use --artifact-root and --require artifacts",
+        ));
+    }
+    if let Some(outcome) = &mut verdict.interop {
+        outcome.original_signer = original_signer;
+        outcome.original_receipt_sha256 = Some(evidence.receipt.sha256.clone());
+        outcome.original_verdict = Some(Box::new(original));
+    }
+    verdict.warnings.push("SLSA is a projection; original Attest evidence and its separate verdict are retained; transported trust files never authorize their own signer".into());
+    Ok(passed)
 }
 
 /// Parse the envelope and its payload; any shape problem is a schema-check
@@ -483,7 +1028,9 @@ fn consistency_check(statement: &Statement) -> Check {
     let mut problems: Vec<String> = Vec::new();
     let predicate = &statement.predicate;
 
-    if predicate.build_definition.build_type != BUILD_TYPE {
+    if predicate.build_definition.build_type != BUILD_TYPE
+        && predicate.build_definition.build_type != LEGACY_BUILD_TYPE
+    {
         problems.push(format!(
             "buildType '{}' is not the ATTEST pipeline buildType",
             predicate.build_definition.build_type
@@ -515,18 +1062,19 @@ fn consistency_check(statement: &Statement) -> Check {
             problems.push(format!("{} is not an RFC 3339 timestamp", name));
         }
     }
-    if !predicate
-        .run_details
-        .builder
-        .id
-        .starts_with("https://alien6.com/attest@v")
+    if predicate.build_definition.build_type == LEGACY_BUILD_TYPE
+        && !predicate
+            .run_details
+            .builder
+            .id
+            .starts_with("https://alien6.com/attest@v")
     {
         problems.push(format!(
             "builder.id '{}' is not an ATTEST builder",
             predicate.run_details.builder.id
         ));
     }
-    if statement.subject.is_empty() {
+    if statement.subject.is_empty() && predicate.build_definition.build_type == LEGACY_BUILD_TYPE {
         problems.push("statement has an empty subject".to_string());
     }
 
@@ -537,7 +1085,7 @@ fn consistency_check(statement: &Statement) -> Check {
     }
 }
 
-/// Verify `signatures[0]` over the DSSE PAE against the trust store
+/// Verify the sole supported signature over the DSSE PAE against the trust store
 /// (issue-#6 semantics: unknown keys fail; revoked keys fail for
 /// statements finished after `revoked_at` and warn otherwise).
 fn signature_check(
@@ -547,6 +1095,9 @@ fn signature_check(
     options: &ImportOptions,
     warnings: &mut Vec<String>,
 ) -> (Check, Option<String>) {
+    if envelope.signatures.len() > 1 {
+        return (check("signature", CheckStatus::Fail, "multiple DSSE signatures are unsupported; no subset is represented as fully verified"), None);
+    }
     let signature = match envelope.signatures.first() {
         Some(signature) => signature,
         None => {
@@ -726,7 +1277,7 @@ mod tests {
     use crate::storage::StepResult;
 
     fn sample_receipt() -> Receipt {
-        Receipt {
+        let mut receipt = Receipt {
             schema_version: Some(crate::storage::RECEIPT_SCHEMA_VERSION),
             pipeline_hash: "a".repeat(64),
             steps: vec![
@@ -766,7 +1317,26 @@ mod tests {
             provenance: None,
             timestamp_token: None,
             isolation: None,
+        };
+        let mut provenance = crate::provenance::collect(Path::new("."), None, true);
+        for step in &mut receipt.steps {
+            let path = format!("{}.bin", step.name);
+            let digest = if step.name == "build" { "c" } else { "e" }.repeat(64);
+            step.output_hash = blake3::hash(
+                format!("{}\nf:{digest} {path}\n", crate::hashing::MANIFEST_HEADER).as_bytes(),
+            )
+            .to_hex()
+            .to_string();
+            provenance.artifacts.push(crate::storage::ArtifactInfo {
+                step: step.name.clone(),
+                path,
+                digest,
+                algorithm: "blake3".into(),
+                kind: "file".into(),
+            });
         }
+        receipt.provenance = Some(provenance);
+        receipt
     }
 
     #[test]
@@ -775,15 +1345,14 @@ mod tests {
         let statement = statement_from_receipt(&receipt).expect("statement");
 
         // Steps sorted by name: audit before build.
-        assert_eq!(statement.subject[0].name, "audit");
-        assert_eq!(statement.subject[1].name, "build");
+        assert_eq!(statement.subject[0].name, "audit.bin");
+        assert_eq!(statement.subject[1].name, "build.bin");
         assert_eq!(statement.subject[1].digest.blake3, "c".repeat(64));
-        assert_eq!(
-            statement.predicate.build_definition.resolved_dependencies[0]
-                .digest
-                .blake3,
-            "d".repeat(64)
-        );
+        assert!(statement
+            .predicate
+            .build_definition
+            .resolved_dependencies
+            .is_empty());
         assert_eq!(
             statement.predicate.run_details.metadata.started_on,
             "2026-08-27T10:00:00Z"
@@ -792,10 +1361,7 @@ mod tests {
             statement.predicate.run_details.metadata.finished_on,
             "2026-08-27T10:00:30Z"
         );
-        assert_eq!(
-            statement.predicate.run_details.builder.id,
-            format!("https://alien6.com/attest@v{}", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(statement.predicate.run_details.builder.id, UNKNOWN_BUILDER);
 
         let first = serde_json::to_string(&statement).expect("json");
         let second = serde_json::to_string(&statement_from_receipt(&receipt).expect("statement"))
@@ -806,14 +1372,14 @@ mod tests {
     }
 
     #[test]
-    fn invocation_id_ignores_signature_fields() {
+    fn invocation_id_binds_the_original_signature_fields() {
         let unsigned = sample_receipt();
         let mut signed = sample_receipt();
         signed.signature = Some("00".repeat(64));
         signed.signer_public_key = Some("11".repeat(32));
         let a = statement_from_receipt(&unsigned).expect("statement");
         let b = statement_from_receipt(&signed).expect("statement");
-        assert_eq!(
+        assert_ne!(
             a.predicate.run_details.metadata.invocation_id,
             b.predicate.run_details.metadata.invocation_id
         );

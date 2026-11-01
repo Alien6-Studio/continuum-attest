@@ -389,7 +389,7 @@ pub fn export_archive(
 /// what ties the two together, and it is possible offline precisely because
 /// the root is a pure function of the events in the order the receipt lists
 /// them.
-fn chain_linkage(
+pub(crate) fn chain_linkage(
     receipt: &Receipt,
     events: &std::collections::HashMap<String, crate::storage::causal_ledger::CausalEvent>,
     partial: bool,

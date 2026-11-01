@@ -1,0 +1,76 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicate": {
+    "attest_evidence": {
+      "artifactBinding": "signed-file-inventory",
+      "format": "attest-original-evidence/v1",
+      "originalSigner": "3a8fe2e94f0ee2dd267ab9089a39355bc824fc7ea71f0e59c104fb8cff1ecd20",
+      "producer": {
+        "name": "continuum-attest",
+        "version": "0.3.1"
+      },
+      "receipt": {
+        "content": "c2NoZW1hX3ZlcnNpb246IDMKcGlwZWxpbmVfaGFzaDogMGJkYWE0MjAxOWI5Yjc1NzVkMTE4YTRhMWNlZTI4ODIzMzg1OGU0OGM4NmM5ZDEwNWE0N2YwODBjNmU3ZTc2MApzdGVwczoKLSBuYW1lOiBidWlsZAogIGlucHV0X2hhc2g6ICcxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExJwogIG91dHB1dF9oYXNoOiBkMTcxMGVlY2U3NGFkN2RkY2Q2ZDgxMjg1NzViZTZmZmFhNTY0YzcwY2Y3OThlNzgxYTEwODYwNjBmMzk2MTkxCiAgZHVyYXRpb25fc2VjczogMQogIGV4aXRfY29kZTogMAogIGNhY2hlX2hpdDogZmFsc2UKICBzdGRvdXQ6ICcnCiAgc3RkZXJyOiAnJwp0aW1lc3RhbXA6IDIwMjYtMDgtMjdUMTI6MDA6NTlaCnRvdGFsX2R1cmF0aW9uX3NlY3M6IDU5CnNpZ25hdHVyZTogMWQ4M2I2OGZjMDE4NDc2YTgwZGFlYThhNmQ0NTVkZThjMWY4YzRkMTQ2YWY5MzE1ZjY2OTkwOTY1ODY1ZGVmMDIzNzJhMzQ5Y2U3YWUyMzM1OGVhMzQ0ZmE4MmEyYmJhODBlYmQ4ZGVmMjQ2NzE4ODM2YWU5ODJhOWU5MDI0MDMKc2lnbmVyX3B1YmxpY19rZXk6IDNhOGZlMmU5NGYwZWUyZGQyNjdhYjkwODlhMzkzNTViYzgyNGZjN2VhNzFmMGU1OWMxMDRmYjhjZmYxZWNkMjAKYXR0ZXN0X3ZlcnNpb246IDAuMS4wCmNhdXNhbF9ldmVudHM6IFtdCmNhdXNhbF9jaGFpbl9oYXNoOiBudWxsCnByb3ZlbmFuY2U6CiAgaW52b2NhdGlvbl9pZDogbnVsbAogIHN0YXJ0ZWRfYXQ6IG51bGwKICBwaXBlbGluZV9uYW1lOiBudWxsCiAgc291cmNlOiBudWxsCiAgcnVubmVyX29zOiBtYWNvcwogIHJ1bm5lcl9hcmNoOiB4ODZfNjQKICBjaTogbnVsbAogIHN0ZXBzOiBbXQogIGFydGlmYWN0czoKICAtIHN0ZXA6IGJ1aWxkCiAgICBwYXRoOiBhcnRpZmFjdC5iaW4KICAgIGtpbmQ6IGZpbGUKICAgIGRpZ2VzdDogNWMxZTFlZmQxYWI1OTExNTY2MDA2MThkZDJjMDFhM2YyMDZmZjYxZTU0NmY4Mzg2MTFlNTBmMzk2Y2Y0YzZiMwogICAgYWxnb3JpdGhtOiBibGFrZTMKICBleGVjdXRpb246CiAgICBtb2RlOiBuYXRpdmUKCiMgUHJlc2VydmUgZXZlbiBjb21tZW50cyBpbiB0aGUgb3JpZ2luYWwgYnl0ZXMuCg==",
+        "mediaType": "application/yaml",
+        "sha256": "e11e47bde92dbca5ffaf19d57a3fc59882a83283f329d1a48831db2c2ac0f44b"
+      },
+      "semantics": [
+        "projection: the original receipt is authoritative for Attest verification",
+        "receipt-signature and RFC3161 timestamp are carried in the original receipt",
+        "trust-material is producer-supplied context, never recipient authorization",
+        "step manifests, causal references, isolation, reproducibility and source observations are carried only in the original receipt",
+        "external causal objects, capsule manifests, source files and artifact bytes are omitted and require separately delivered evidence",
+        "resolvedDependencies is empty: input manifests are not individual resource digests",
+        "symlinks are carried in the original inventory but are not file-digest subjects",
+        "workflow identifies the authorizing signing workflow, not runner integrity or build correctness",
+        "no separate artifact signature is asserted",
+        "startedOn is derived from the producer-reported completion and duration, not trusted time"
+      ],
+      "trustMaterial": {
+        "03f5950902cb2a02b0f4002ca626d85c.pub": {
+          "content": "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JRWURLMlZ3QXlFQTRZS1Z5clJoZytUYzBWWTZMdEd6bmVsQjZVTmlDWm9uUDU3MVhwYnJLL1k9Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo=",
+          "mediaType": "application/octet-stream",
+          "sha256": "67f51dbcc9601301ff89bd8115cb4a6c97dd127f16cab6362272ba04b0a8994b"
+        },
+        "e1311a90be6e22aea76d0aa645786962.pub": {
+          "content": "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUNvd0JRWURLMlZ3QXlFQU9vL2k2VThPNHQwbWVya0ltamsxVzhnay9INm5IdzVad1FUN2pQOGV6U0E9Ci0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo=",
+          "mediaType": "application/octet-stream",
+          "sha256": "7cda68ed117609b67120eeb43e18395d063792466078848547e0a1d908a8a673"
+        },
+        "trust.toml": {
+          "content": "dmVyc2lvbiA9IDEKCltba2V5XV0KaWQgPSAiZTEzMTFhOTBiZTZlMjJhZWE3NmQwYWE2NDU3ODY5NjIiCm5hbWUgPSAib3JpZ2luYWwiCnN0YXR1cyA9ICJ0cnVzdGVkIgoKW1trZXldXQppZCA9ICIwM2Y1OTUwOTAyY2IyYTAyYjBmNDAwMmNhNjI2ZDg1YyIKbmFtZSA9ICJleHBvcnRlciIKc3RhdHVzID0gInRydXN0ZWQiCg==",
+          "mediaType": "application/octet-stream",
+          "sha256": "3630b2e454368ae8808483ee12472bc8562584f9493cecd3dfb5672c06ba81dc"
+        }
+      },
+      "workflow": null,
+      "workflowBundle": null
+    },
+    "buildDefinition": {
+      "buildType": "https://github.com/Alien6-Studio/continuum-attest/blob/main/docs/specifications/attest-pipeline-v2.md",
+      "externalParameters": {
+        "pipelineHash": "0bdaa42019b9b7575d118a4a1cee288233858e48c86c9d105a47f080c6e7e760"
+      },
+      "resolvedDependencies": []
+    },
+    "runDetails": {
+      "builder": {
+        "id": "urn:attest:builder:unverified"
+      },
+      "metadata": {
+        "finishedOn": "2026-08-27T12:00:59Z",
+        "invocationId": "e11e47bde92dbca5ffaf19d57a3fc59882a83283f329d1a48831db2c2ac0f44b",
+        "startedOn": "2026-08-27T12:00:00Z"
+      }
+    }
+  },
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "subject": [
+    {
+      "digest": {
+        "blake3": "5c1e1efd1ab591156600618dd2c01a3f206ff61e546f838611e50f396cf4c6b3"
+      },
+      "name": "artifact.bin"
+    }
+  ]
+}

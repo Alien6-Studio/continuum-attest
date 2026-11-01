@@ -1090,7 +1090,14 @@ fn forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_r
 
     let imported = attest()
         .current_dir(dir.path())
-        .args(["import", "--format", "in-toto", statement.to_str().unwrap()])
+        .args([
+            "import",
+            "--format",
+            "in-toto",
+            statement.to_str().unwrap(),
+            "--report",
+            "json",
+        ])
         .output()
         .unwrap();
     let combined = format!(
@@ -1101,6 +1108,17 @@ fn forging_acceptance_by_round_tripping_a_revoked_signature_through_in_toto_is_r
     assert!(
         !imported.status.success(),
         "a revoked signature must not become acceptable by changing envelope:\n{combined}"
+    );
+    let verdict: serde_json::Value = serde_json::from_slice(&imported.stdout).unwrap();
+    assert_eq!(
+        verdict["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "dsse-signature")
+            .unwrap()["status"],
+        "fail",
+        "the original-receipt refusal must not hide an accepted revoked DSSE signer"
     );
 }
 
@@ -2786,5 +2804,127 @@ mod release_handoff {
         let keypair = AttestKeypair::from_signing_key(signing_key);
         receipt.signature = Some(keypair.sign(receipt_signing_bytes(receipt).unwrap().as_bytes()));
         receipt.signer_public_key = Some(keypair.public_key_hex());
+    }
+}
+
+#[path = "support/evidence_proofs.rs"]
+mod proof_fixture;
+
+#[test]
+fn forging_completeness_by_omitting_a_required_capsule_is_refused() {
+    let fixture = proof_fixture::ProofRelease::new();
+    fixture
+        .release
+        .mutate_archive(|entries| entries.retain(|entry| !entry.path.starts_with("capsules/")));
+    let result = fixture.release.verify(&[], 1);
+    assert_eq!(
+        release_fixture::check(&result, "capsule")["status"],
+        "skipped"
+    );
+    assert!(result["policy"]["unmet"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["requirement"] == "capsule"));
+}
+
+#[test]
+fn forging_capsule_material_behind_a_signed_hash_is_refused() {
+    let fixture = proof_fixture::ProofRelease::new();
+    fixture.release.mutate_archive(|entries| {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.path.starts_with("capsules/"))
+            .unwrap();
+        let mut manifest: attest::capsule::CapsuleManifest =
+            serde_yaml::from_slice(&entry.bytes).unwrap();
+        manifest.image = format!("attacker/image@sha256:{}", "c".repeat(64));
+        entry.bytes = serde_yaml::to_string(&manifest).unwrap().into_bytes();
+    });
+    assert_eq!(
+        release_fixture::check(&fixture.release.verify(&[], 1), "capsule")["status"],
+        "fail"
+    );
+}
+
+#[test]
+fn forging_completeness_by_omitting_required_causal_events_is_refused() {
+    let fixture = proof_fixture::ProofRelease::new();
+    fixture
+        .release
+        .mutate_archive(|entries| entries.retain(|entry| !entry.path.starts_with("events/")));
+    let result = fixture.release.verify(&[], 1);
+    assert_eq!(
+        release_fixture::check(&result, "chain-linkage")["status"],
+        "skipped"
+    );
+    assert!(result["policy"]["unmet"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["requirement"] == "linkage"));
+}
+
+#[test]
+fn substituting_self_consistent_causal_events_behind_a_signed_root_is_refused() {
+    let fixture = proof_fixture::ProofRelease::new();
+    fixture.release.mutate_archive(|entries| {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.path.starts_with("events/"))
+            .unwrap();
+        let mut event: attest::storage::causal_ledger::CausalEvent =
+            serde_json::from_slice(&entry.bytes).unwrap();
+        event.output_hash = "f".repeat(64);
+        entry.bytes = serde_json::to_vec(&event).unwrap();
+    });
+    assert_eq!(
+        release_fixture::check(&fixture.release.verify(&[], 1), "chain-linkage")["status"],
+        "fail"
+    );
+}
+
+#[path = "support/wrapped_security.rs"]
+mod wrapped_security;
+
+#[path = "support/interop_projection.rs"]
+mod interop_projection;
+
+#[test]
+fn forging_causal_claims_in_unsigned_metadata_is_refused() {
+    let fixture = proof_fixture::ProofRelease::new();
+    fixture.release.mutate_archive(|entries| {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.path.starts_with("events/"))
+            .unwrap();
+        let mut event: serde_json::Value = serde_json::from_slice(&entry.bytes).unwrap();
+        assert_eq!(event["metadata"], serde_json::json!({}));
+        event["metadata"] = serde_json::json!({"authorized": "attacker's unsigned claim"});
+        entry.bytes = serde_json::to_vec(&event).unwrap();
+    });
+    assert_eq!(
+        release_fixture::check(&fixture.release.verify(&[], 1), "chain-linkage")["status"],
+        "fail"
+    );
+}
+
+#[test]
+fn forging_proof_claims_in_unknown_extensions_is_refused() {
+    for (prefix, check_name) in [("capsules/", "capsule"), ("events/", "chain-linkage")] {
+        let fixture = proof_fixture::ProofRelease::new();
+        fixture.release.mutate_archive(|entries| {
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.path.starts_with(prefix))
+                .unwrap();
+            let mut value: serde_json::Value = serde_yaml::from_slice(&entry.bytes).unwrap();
+            value["unauthenticated_claim"] = serde_json::json!("attacker-controlled");
+            entry.bytes = serde_json::to_vec(&value).unwrap();
+        });
+        assert_eq!(
+            release_fixture::check(&fixture.release.verify(&[], 1), check_name)["status"],
+            "fail"
+        );
     }
 }

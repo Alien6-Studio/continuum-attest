@@ -309,8 +309,19 @@ enum Commands {
         format: String,
     },
 
+    /// Timestamp an existing receipt signature without a private key
+    Timestamp {
+        receipt: std::path::PathBuf,
+        #[arg(long, default_value = attest::crypto::timestamp::DEFAULT_TSA_URL)]
+        tsa: String,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+
     /// Export a receipt to a standard attestation format
     Export {
+        #[command(flatten)]
+        identity: ExportIdentityArgs,
         #[arg(long, value_name = "RECEIPT", help = "Receipt file to export")]
         receipt: String,
 
@@ -348,6 +359,8 @@ enum Commands {
 
     /// Import and verify a standard attestation
     Import {
+        #[command(flatten)]
+        evidence: ImportEvidenceArgs,
         #[arg(value_name = "STATEMENT", help = "DSSE envelope JSON file")]
         statement: String,
 
@@ -376,13 +389,6 @@ enum Commands {
             help = "Refuse unless this property is established: signature (comma-separated, repeatable)"
         )]
         require: Vec<String>,
-
-        #[arg(
-            long,
-            default_value = "text",
-            help = "Report format: text or json (NDJSON)"
-        )]
-        report: String,
     },
 
     /// Image signature verification operations
@@ -792,6 +798,26 @@ enum CausalCommands {
     },
 }
 
+#[derive(clap::Args)]
+struct ExportIdentityArgs {
+    #[arg(long, requires = "identity_policy")]
+    identity_bundle: Option<std::path::PathBuf>,
+    #[arg(long, requires = "identity_bundle")]
+    identity_policy: Option<std::path::PathBuf>,
+    #[arg(long)]
+    trust_store: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct ImportEvidenceArgs {
+    #[arg(long)]
+    identity_policy: Option<std::path::PathBuf>,
+    #[arg(long)]
+    artifact_root: Option<std::path::PathBuf>,
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    report: String,
+}
+
 #[derive(Subcommand)]
 enum EvidenceCommands {
     /// Package a signed receipt and its declared artifacts for offline transfer
@@ -803,6 +829,8 @@ enum EvidenceCommands {
         workspace: std::path::PathBuf,
         #[arg(long)]
         identity_bundle: Option<std::path::PathBuf>,
+        #[arg(long, help = "Capsule manifest referenced by the receipt (repeatable)")]
+        capsule_manifest: Vec<std::path::PathBuf>,
     },
     /// Require trusted signature, successful build and matching artifact bytes
     Verify {
@@ -819,6 +847,11 @@ enum EvidenceCommands {
             help = "Also verify separately distributed artifacts under this directory"
         )]
         artifact_root: Option<std::path::PathBuf>,
+        #[arg(
+            long,
+            help = "Recipient's required properties (default: signature,success,artifacts,capsule,linkage; comma-separated, repeatable)"
+        )]
+        require: Vec<String>,
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
     },
@@ -1183,7 +1216,20 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
 
+        Commands::Timestamp {
+            receipt,
+            tsa,
+            output,
+        } => match attest::core::timestamp_receipt_file(&receipt, &tsa, output.as_deref()) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("error: timestamping failed: {error:#}");
+                std::process::exit(2);
+            }
+        },
+
         Commands::Export {
+            identity,
             receipt,
             format,
             output,
@@ -1191,7 +1237,15 @@ async fn main() -> Result<()> {
             key,
             workspace,
         } => {
-            let code = handle_export(receipt, format, output, allow_unsigned, key, workspace);
+            let code = handle_export(
+                receipt,
+                format,
+                output,
+                allow_unsigned,
+                key,
+                workspace,
+                identity,
+            );
             std::process::exit(code);
         }
 
@@ -1309,13 +1363,13 @@ async fn main() -> Result<()> {
         }
 
         Commands::Import {
+            evidence,
             statement,
             format,
             workspace,
             trust_store,
             trust_statement_time,
             require,
-            report,
         } => {
             let code = handle_import(
                 statement,
@@ -1324,7 +1378,7 @@ async fn main() -> Result<()> {
                 trust_store,
                 trust_statement_time,
                 require,
-                report,
+                evidence,
             );
             std::process::exit(code);
         }
@@ -1758,6 +1812,19 @@ fn handle_trust(action: TrustCommands) -> i32 {
     }
 }
 
+fn read_identity_policy(path: &std::path::Path) -> Result<attest::identity::IdentityPolicy> {
+    let bytes = attest::verify::read_bounded(path, 1024 * 1024, "identity policy")?;
+    let mut policy: attest::identity::IdentityPolicy = serde_json::from_slice(&bytes)?;
+    if policy.trusted_root.is_relative() {
+        policy.trusted_root = path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(&policy.trusted_root);
+    }
+    policy.validate()?;
+    Ok(policy)
+}
+
 fn handle_evidence(action: EvidenceCommands) -> i32 {
     match action {
         EvidenceCommands::Pack {
@@ -1765,9 +1832,15 @@ fn handle_evidence(action: EvidenceCommands) -> i32 {
             workspace,
             output,
             identity_bundle,
+            capsule_manifest,
         } => {
-            match attest::evidence::pack(&receipt, &workspace, &output, identity_bundle.as_deref())
-            {
+            match attest::evidence::pack_with_capsules(
+                &receipt,
+                &workspace,
+                &output,
+                identity_bundle.as_deref(),
+                &capsule_manifest,
+            ) {
                 Ok(()) => {
                     println!("{}", output.display());
                     0
@@ -1782,6 +1855,7 @@ fn handle_evidence(action: EvidenceCommands) -> i32 {
             trust_store,
             identity_policy,
             artifact_root,
+            require,
             format,
         } => {
             let result = (|| -> Result<_> {
@@ -1800,11 +1874,17 @@ fn handle_evidence(action: EvidenceCommands) -> i32 {
                         Ok(policy)
                     })
                     .transpose()?;
-                attest::evidence::verify(
+                let requirements = if require.is_empty() {
+                    attest::evidence::default_policy()
+                } else {
+                    attest::verify::Policy::parse(&require).map_err(anyhow::Error::msg)?
+                };
+                attest::evidence::verify_with_policy(
                     &archive,
                     &trust_store,
                     policy.as_ref(),
                     artifact_root.as_deref(),
+                    &requirements,
                 )
             })();
             match result {
@@ -1973,6 +2053,7 @@ fn handle_export(
     allow_unsigned: bool,
     key: Option<String>,
     workspace: Option<String>,
+    identity: ExportIdentityArgs,
 ) -> i32 {
     use attest::interop::{export_receipt_file, ExportOptions, ExportOutcome};
 
@@ -1987,10 +2068,25 @@ fn handle_export(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("cannot determine current directory"));
 
+    let identity_policy = match identity
+        .identity_policy
+        .as_deref()
+        .map(read_identity_policy)
+        .transpose()
+    {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return 2;
+        }
+    };
     let options = ExportOptions {
         allow_unsigned,
         key,
         workspace,
+        identity_bundle: identity.identity_bundle,
+        identity_policy,
+        trust_store: identity.trust_store,
     };
     match export_receipt_file(std::path::Path::new(&receipt), &options) {
         Ok(ExportOutcome::Written { json, warnings }) => {
@@ -2041,9 +2137,10 @@ fn handle_import(
     trust_store: Option<String>,
     trust_statement_time: bool,
     require: Vec<String>,
-    report: String,
+    evidence: ImportEvidenceArgs,
 ) -> i32 {
     use attest::interop::{import_statement_file, ImportOptions};
+    let report = evidence.report;
 
     let policy = match attest::verify::Policy::parse(&require) {
         Ok(policy) => policy,
@@ -2071,11 +2168,25 @@ fn handle_import(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("cannot determine current directory"));
 
+    let identity_policy = match evidence
+        .identity_policy
+        .as_deref()
+        .map(read_identity_policy)
+        .transpose()
+    {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return 2;
+        }
+    };
     let options = ImportOptions {
         workspace,
         trust_store: trust_store.map(std::path::PathBuf::from),
         trust_statement_time,
         policy,
+        identity_policy,
+        artifact_root: evidence.artifact_root,
     };
     let verdict = match import_statement_file(std::path::Path::new(&statement), &options) {
         Ok(verdict) => verdict,

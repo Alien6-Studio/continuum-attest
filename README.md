@@ -308,10 +308,13 @@ path requires Cosign 3 and a separately provisioned Sigstore trusted root.
 See the [producer and recipient guide](docs/ci-adoption.md) for both CI systems,
 policy examples and rejection scenarios.
 
-The receipt format and its signing bytes are unchanged. Local key signing,
+Existing receipts retain their signing bytes. New wrapped receipts also record
+their execution mode and canonical command arguments for independent recomputation.
+Local key signing,
 trust bundles, capsules, causal archives and in-toto/SLSA interop remain
-available. The new release archive has its own `attest-evidence/v1` format;
-its verdict adds `artifacts` and `identity` checks and is separate from the
+available. The release archive uses [`attest-evidence/v2`](docs/evidence-format.md);
+its verdict includes artifact, workflow identity, capsule and causal completeness
+checks and is separate from the
 receipt-file JSON schema.
 
 Interfaces that carry a `schema_version` (receipts, `attest.yaml`) follow a

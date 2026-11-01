@@ -9,6 +9,7 @@ OIDC proof online, then transfers it to a separate offline verification phase.
 """
 
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ import subprocess
 import tempfile
 
 
-def identity_smoke(binary, phase, state, source, trusted_root):
+def identity_smoke(binary, phase, state, source, trusted_root, provider="github"):
     environment = os.environ.copy()
     environment.pop("ATTEST_KEYS_DIR", None)
     producer, recipient, delivery = (state / name for name in ("producer", "recipient", "delivery"))
@@ -29,6 +30,19 @@ def identity_smoke(binary, phase, state, source, trusted_root):
         return result.stdout
 
     policy_path = recipient / "workflow-policy.json"
+    if phase == "produce":
+        if provider == "gitlab":
+            revision = environment["CI_COMMIT_SHA"]
+            repository = environment["CI_PROJECT_URL"]
+            issuer = environment["CI_SERVER_URL"]
+            ref = ("refs/tags/" + environment["CI_COMMIT_TAG"] if environment.get("CI_COMMIT_TAG")
+                   else "refs/heads/" + environment["CI_COMMIT_BRANCH"])
+            workflow = repository + "//" + environment.get("CI_CONFIG_PATH", ".gitlab-ci.yml") + "@" + ref
+        else:
+            revision = environment["GITHUB_SHA"]
+            repository = "https://github.com/" + environment["GITHUB_REPOSITORY"]
+            issuer = "https://token.actions.githubusercontent.com"
+            workflow = "https://github.com/" + environment["GITHUB_WORKFLOW_REF"]
     archive = delivery / "release.attest.tar.zst"
     if phase == "produce":
         state.mkdir()
@@ -36,9 +50,10 @@ def identity_smoke(binary, phase, state, source, trusted_root):
         delivery.mkdir()
         # Copy git objects instead of sharing the checkout or touching its trust store.
         subprocess.run(["git", "clone", "--no-hardlinks", "--no-checkout", str(source), str(producer)], check=True)
-        subprocess.run(["git", "-C", str(producer), "checkout", "--detach", environment["GITHUB_SHA"]], check=True)
+        subprocess.run(["git", "-C", str(producer), "checkout", "--detach", revision], check=True)
+        subprocess.run(["git", "-C", str(producer), "remote", "set-url", "origin", repository], check=True)
         report = producer / "wrap.json"
-        run(["run", "--wrap", "--name", "github-oidc-smoke", "--input", "Cargo.toml",
+        run(["run", "--wrap", "--name", provider + "-oidc-smoke", "--input", "Cargo.toml",
              "--output", "artifact.bin", "--report", str(report), "--", "sh", "-c",
              'test ! -d .attest/keys && cp Cargo.toml artifact.bin'], producer)
         receipt = Path(json.loads(report.read_text())["receipt"])
@@ -50,20 +65,24 @@ def identity_smoke(binary, phase, state, source, trusted_root):
         run(["keys", "export", key, "--output", str(public)], producer)
         run(["sign", str(receipt), "--key", key], producer)
         bundle = state / "identity.sigstore.json"
-        run(["identity", "sign", str(receipt), "--bundle", str(bundle)], producer)
+        identity_command = ["identity", "sign", str(receipt), "--bundle", str(bundle)]
+        if provider == "gitlab":
+            identity_command.extend(["--identity-token-env", "ATTEST_CI_ID_TOKEN"])
+        run(identity_command, producer)
         run(["evidence", "pack", str(receipt), "--identity-bundle", str(bundle), "--output", str(archive)], producer)
         run(["keys", "import", str(public), "--name", "approved-release"], recipient)
         shutil.copyfile(producer / "artifact.bin", delivery / "artifact.bin")
         # Supplied by the separate TUF bootstrap, never read from the bundle.
         shutil.copyfile(trusted_root, recipient / "trusted-root.json")
         policy_path.write_text(json.dumps({
-            "issuer": "https://token.actions.githubusercontent.com",
-            "repository": "https://github.com/" + environment["GITHUB_REPOSITORY"],
-            "workflow": "https://github.com/" + environment["GITHUB_WORKFLOW_REF"],
-            "revision": environment["GITHUB_SHA"], "trusted_root": "trusted-root.json",
+            "issuer": issuer, "repository": repository, "workflow": workflow,
+            "revision": revision, "trusted_root": "trusted-root.json",
         }))
+        run(["export", "--receipt", str(receipt), "--format", "in-toto",
+             "--identity-bundle", str(bundle), "--identity-policy", str(policy_path),
+             "--output", str(recipient / "projection.json")], producer)
         shutil.rmtree(producer)
-        print("Fresh native receipt and GitHub OIDC identity prepared; producer removed")
+        print(f"Fresh native receipt and {provider} OIDC identity prepared; producer removed")
         return
 
     assert not producer.exists() and not (recipient / ".attest/keys").exists()
@@ -73,20 +92,47 @@ def identity_smoke(binary, phase, state, source, trusted_root):
     accepted = json.loads(run(verify, recipient))
     checks = {check["name"]: check["status"] for check in accepted["checks"]}
     assert accepted["verdict"] == "pass" and all(checks[name] == "pass" for name in ("signature", "identity", "artifacts")), accepted
+    policy = json.loads(policy_path.read_text())
+    expected_claims = {key: policy[key] for key in ("issuer", "repository", "workflow", "revision")}
+    assert accepted["identity"]["verified"] == expected_claims, accepted
+    assert all(accepted["identity"]["required"][key] == value for key, value in expected_claims.items()), accepted
+    assert "identity" in accepted["policy"]["required"], accepted
+    principals = accepted["identity"]["principals"]
+    assert principals["evidence_producer"] == accepted["signed_by"], accepted
+    assert principals["workflow"] == policy["workflow"] and principals["artifact_signer"] is None, accepted
+    imported = json.loads(run([
+        "import", str(recipient / "projection.json"), "--format", "in-toto",
+        "--trust-store", ".attest/trust", "--identity-policy", str(policy_path),
+        "--artifact-root", str(delivery), "--require", "signature,identity,artifacts,success",
+        "--report", "json"], recipient))
+    assert imported["verdict"] == "pass", imported
+    assert imported["identity"]["verified"] == expected_claims, imported
+    envelope = json.loads((recipient / "projection.json").read_text())
+    projection = json.loads(base64.b64decode(envelope["payload"], validate=True))
+    assert projection["predicate"]["runDetails"]["builder"]["id"] == policy["workflow"], projection
+    (recipient / "imported-projection.json").write_text(json.dumps(imported, indent=2) + "\n")
+    (recipient / "accepted.json").write_text(json.dumps(accepted, indent=2) + "\n")
     original = (delivery / "artifact.bin").read_bytes()
     (delivery / "artifact.bin").write_bytes(b"substituted artifact\n")
     replaced = json.loads(run(verify, recipient, expected=1))
     assert any(c["name"] == "artifacts" and c["status"] == "fail" for c in replaced["checks"]), replaced
+    (recipient / "replaced-artifact.json").write_text(json.dumps(replaced, indent=2) + "\n")
     (delivery / "artifact.bin").write_bytes(original)
     approved = policy_path.read_text()
     unauthorized = json.loads(approved)
-    unauthorized["workflow"] = "https://github.com/unapproved/project/.github/workflows/release.yml@refs/heads/main"
+    unauthorized["workflow"] = policy["repository"] + "/unapproved-workflow.yml@refs/heads/unapproved"
     policy_path.write_text(json.dumps(unauthorized))
     refused = json.loads(run(verify, recipient, expected=1))
-    assert any(c["name"] == "identity" and c["status"] == "fail" for c in refused["checks"]), refused
+    assert refused["verdict"] == "fail", refused
+    assert any(c["name"] == "identity" and c["status"] == "fail"
+               and "certificate identity" in c["detail"] for c in refused["checks"]), refused
+    assert any(c["name"] == "signature" and c["status"] == "pass" for c in refused["checks"]), refused
+    assert refused["identity"]["verified"] is None, refused
+    assert refused["identity"]["principals"]["workflow"] is None, refused
+    (recipient / "unauthorized-workflow.json").write_text(json.dumps(refused, indent=2) + "\n")
     policy_path.write_text(approved)
     assert json.loads(run(verify, recipient))["verdict"] == "pass"
-    print("Fresh GitHub OIDC receipt verified offline; replaced artifact and unauthorized workflow rejected")
+    print(f"Fresh {provider} OIDC receipt verified offline; replaced artifact and unauthorized workflow rejected")
 
 
 def smoke(binary):
@@ -186,14 +232,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("attest", type=Path, help="Path to the packaged attest binary")
     parser.add_argument("--identity-phase", choices=("produce", "verify"))
+    parser.add_argument("--provider", choices=("github", "gitlab"), default="github")
     parser.add_argument("--state", type=Path, help="Transfer directory shared by the two identity phases")
-    parser.add_argument("--source", type=Path, default=Path.cwd(), help="Checkout to clone at GITHUB_SHA")
+    parser.add_argument("--source", type=Path, default=Path.cwd(), help="Checkout to clone at the provider source commit")
     parser.add_argument("--trusted-root", type=Path, help="Independent TUF-authenticated Sigstore root")
     options = parser.parse_args()
     if options.identity_phase:
         if not options.state or (options.identity_phase == "produce" and not options.trusted_root):
             parser.error("identity mode requires --state; production also requires --trusted-root")
         identity_smoke(options.attest.resolve(strict=True), options.identity_phase,
-                       options.state.resolve(), options.source.resolve(), options.trusted_root)
+                       options.state.resolve(), options.source.resolve(), options.trusted_root, options.provider)
     else:
         smoke(options.attest.resolve(strict=True))

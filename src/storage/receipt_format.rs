@@ -119,6 +119,19 @@ pub struct ExecutionProvenance {
     pub ci: Option<CiInfo>,
     pub steps: Vec<StepProvenance>,
     pub artifacts: Vec<ArtifactInfo>,
+    /// How the execution was declared. Absent on older receipts; absence
+    /// must not be interpreted as proof of a native pipeline or a wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionDescriptor>,
+}
+
+/// A wrapped command keeps argument boundaries so its identity can be
+/// recomputed without borrowing a pipeline file from the producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ExecutionDescriptor {
+    Native,
+    Wrapped { command: Vec<String> },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

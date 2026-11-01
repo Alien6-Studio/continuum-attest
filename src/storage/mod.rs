@@ -32,8 +32,9 @@ pub struct CacheCleanupResult {
 
 mod receipt_format;
 pub use receipt_format::{
-    receipt_signing_bytes, ArtifactInfo, CiInfo, ExecutionProvenance, Receipt, ReproducibilityInfo,
-    SignerInfo, SourceInfo, StepProvenance, StepResult, RECEIPT_SCHEMA_VERSION,
+    receipt_signing_bytes, ArtifactInfo, CiInfo, ExecutionDescriptor, ExecutionProvenance, Receipt,
+    ReproducibilityInfo, SignerInfo, SourceInfo, StepProvenance, StepResult,
+    RECEIPT_SCHEMA_VERSION,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

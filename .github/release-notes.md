@@ -1,4 +1,46 @@
-# 0.3.0 — Ember Sky
+# 0.3.1 — Ember Sky
+
+This corrective release completes the verification contracts left unfinished
+in 0.3.0. The Ember Sky milestone remains open until the real GitLab
+producer/recipient acceptance scenarios in
+[#25](https://github.com/Alien6-Studio/continuum-attest/issues/25) pass.
+GitHub acceptance uses fresh provider-issued identity and an offline recipient;
+automated GitLab component tests do not replace the hosted GitLab scenario.
+
+## Corrections since 0.3.0
+
+- Wrapped receipts record canonical command arguments and execution mode.
+  Recipients can recompute declared inputs and outputs without `attest.yaml`.
+  Wrapping applies the native local input guard and checks inputs after the
+  command, while preserving a failed build's original exit code.
+- Both CI integrations expose separate build, receipt generation, signing,
+  timestamping, verification and publication outcomes, with an explicit
+  required/optional evidence policy. GitLab confirms package publication
+  before writing its final machine report. `attest timestamp` adds trusted
+  time evidence to an existing signature without accessing a private key.
+- Workflow verdicts retain the exact recipient policy, verified claims and
+  separate evidence-producer, workflow and artifact-signer roles.
+- Evidence packages carry referenced capsule manifests and causal events.
+  Recipient policy determines completeness; missing or altered required
+  proofs prevent offline acceptance and are identified in the verdict.
+- SLSA exports preserve the exact original receipt, signer, timestamp and
+  public trust context. Subjects identify actual artifact bytes. Builder
+  identity is a verified workflow or explicitly unverified. Import verifies
+  the DSSE signer and original receipt authority separately; re-signing
+  cannot authorize a revoked or unknown original signer. Unsupported
+  multiple envelope signatures are explicitly refused.
+
+## Format compatibility
+
+Existing native receipt signatures remain valid. New optional execution
+metadata is signed. New evidence packages use `attest-evidence/v2`; 0.3.1
+still reads v1 packages with the new completeness checks. **Older verifiers
+refuse v2 packages: upgrade recipients before distributing newly packed
+evidence.** New SLSA projections use the
+[versioned build-type definition](https://github.com/Alien6-Studio/continuum-attest/blob/v__VERSION__/docs/specifications/attest-pipeline-v2.md).
+Legacy imports explicitly report their narrower verification semantics.
+
+## Existing CI adoption
 
 Attest can wrap one existing GitHub or GitLab build job and transfer its
 signed receipt together with the declared output bytes for offline checking.

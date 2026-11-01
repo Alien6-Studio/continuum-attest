@@ -4,7 +4,7 @@ description: "Wrap an existing build, sign its receipt and publish offline relea
 
 inputs:
   version:
-    description: "attest release version without v (0.3.0 or newer)"
+    description: "attest release version without v (0.3.1 or newer for the full evidence contract)"
     required: true
   sha256:
     description: "Pinned SHA-256 of attest-vVERSION-linux-x86_64.tar.gz"
@@ -27,8 +27,17 @@ inputs:
   identity:
     description: "Also bind the receipt to GitHub OIDC with cosign v3; requires id-token: write"
     default: "false"
+  evidence-policy:
+    description: "required fails a successful build on evidence failure; optional reports the failure without failing it"
+    default: "required"
+  trust-store:
+    description: "Independent public trust directory for verification (default WORKSPACE/.attest/trust)"
+    default: ""
+  identity-policy:
+    description: "Optional independent recipient policy used to verify the produced archive"
+    default: ""
   extra-args:
-    description: "Additional wrap flags, shell-quoted if needed; --sign is always enabled"
+    description: "Additional wrap flags, shell-quoted if needed; signing is performed after the build"
     default: ""
   base-url:
     description: "HTTPS release store or internal mirror"
@@ -44,6 +53,30 @@ outputs:
   publication-status:
     description: "published, failed or skipped, from the actual upload outcome"
     value: ${{ steps.finish.outputs.publication-status }}
+  status:
+    description: "Final JSON status: build, evidence policy, production, verification, publication and errors"
+    value: ${{ steps.finish.outputs.status }}
+  build-status:
+    description: "not_started, succeeded or failed"
+    value: ${{ steps.finish.outputs.build-status }}
+  evidence-policy:
+    description: "required or optional"
+    value: ${{ steps.finish.outputs.evidence-policy }}
+  publication-url:
+    description: "URL returned by the successful artifact upload"
+    value: ${{ steps.finish.outputs.publication-url }}
+  exit-code:
+    description: "Final integration exit code after applying evidence policy"
+    value: ${{ steps.finish.outputs.exit-code }}
+  verification-status:
+    description: "passed, failed or skipped"
+    value: ${{ steps.finish.outputs.verification-status }}
+  error-code:
+    description: "Stable machine-readable failure code, empty on success"
+    value: ${{ steps.finish.outputs.error-code }}
+  failure-stage:
+    description: "receipt, signing, timestamping, identity, packaging, verification, publication or reporting"
+    value: ${{ steps.finish.outputs.failure-stage }}
   receipt:
     description: "Exact receipt path produced by this invocation"
     value: ${{ steps.build.outputs.receipt }}
@@ -67,7 +100,7 @@ runs:
         [[ "$ATTEST_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || exit 2
         install_dir="$(mktemp -d "$RUNNER_TEMP/attest-bin.XXXXXX")"
         package="attest-v${ATTEST_VERSION}-linux-x86_64.tar.gz"
-        curl --proto '=https' --tlsv1.2 -fsSLo "$install_dir/$package" "${ATTEST_BASE_URL}/v${ATTEST_VERSION}/${package}"
+        curl --proto '=https' --proto-redir '=https' --location --tlsv1.2 -fsSLo "$install_dir/$package" "${ATTEST_BASE_URL}/v${ATTEST_VERSION}/${package}"
         (cd "$install_dir" && printf '%s  %s\n' "$ATTEST_SHA256" "$package" | sha256sum -c -)
         tar -xzf "$install_dir/$package" -C "$install_dir" attest
         chmod +x "$install_dir/attest"
@@ -84,11 +117,14 @@ runs:
         ATTEST_KEY: ${{ inputs.key }}
         ATTEST_IDENTITY: ${{ inputs.identity }}
         ATTEST_EXTRA_ARGS: ${{ inputs.extra-args }}
+        ATTEST_EVIDENCE_POLICY: ${{ inputs.evidence-policy }}
+        ATTEST_TRUST_STORE: ${{ inputs.trust-store }}
+        ATTEST_IDENTITY_POLICY: ${{ inputs.identity-policy }}
       run: python3 "$GITHUB_ACTION_PATH/run.py"
 
     - name: Publish release evidence and build report
       id: publish
-      if: ${{ !cancelled() && steps.build.outputs.directory != '' }}
+      if: ${{ !cancelled() && steps.build.outputs.evidence != '' }}
       continue-on-error: true
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
@@ -102,24 +138,13 @@ runs:
       if: ${{ !cancelled() }}
       shell: bash
       env:
+        ATTEST_DIRECTORY: ${{ steps.build.outputs.directory }}
         ATTEST_EXIT_CODE: ${{ steps.build.outputs.exit-code }}
         ATTEST_BUILD_OUTCOME: ${{ steps.build.outcome }}
         ATTEST_PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
+        ATTEST_PUBLICATION_URL: ${{ steps.publish.outputs.artifact-url }}
       run: |
-        set -euo pipefail
-        case "$ATTEST_PUBLISH_OUTCOME" in
-          success) publication=published ;;
-          failure) publication=failed ;;
-          *) publication=skipped ;;
-        esac
-        report_status=0
-        echo "publication-status=$publication" >> "$GITHUB_OUTPUT" || report_status=$?
-        echo "attest: publication $publication"
-        # A failed build keeps its code even if evidence or upload also failed.
-        if [[ -n "$ATTEST_EXIT_CODE" && "$ATTEST_EXIT_CODE" != 0 ]]; then exit "$ATTEST_EXIT_CODE"; fi
-        # If output reporting failed, the build step already exited with the
-        # original code. Do not add a new failure that obscures it.
-        if [[ "$ATTEST_BUILD_OUTCOME" != success ]]; then exit 0; fi
-        [[ -n "$ATTEST_EXIT_CODE" ]] || exit 2
-        [[ "$report_status" == 0 ]] || exit 2
-        [[ "$publication" == published ]] || exit 2
+        python3 "$GITHUB_ACTION_PATH/run.py" --finalize \
+          --directory "$ATTEST_DIRECTORY" \
+          --publication-outcome "$ATTEST_PUBLISH_OUTCOME" \
+          --build-outcome "$ATTEST_BUILD_OUTCOME"
