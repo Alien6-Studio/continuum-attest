@@ -7,13 +7,10 @@ Glass Ocean adds an observation outside the producer's own history: choose a
 log you trust, publish a commitment to the build's causal record, and deliver
 the proof with the software. Your recipient can check that proof offline.
 
-**Development draft.** Qualification is in progress. The recommended published
-release remains 0.3.1 until Glass Ocean is released.
-
 ## Install
 
-Available on Linux and macOS, for x86-64 and arm64. Once this release is
-published, download a binary below or install the crate:
+Available on Linux and macOS, for x86-64 and arm64. Download a binary below
+or install the published crate:
 
 ```console
 cargo install continuum-attest --version 0.4.0 --locked

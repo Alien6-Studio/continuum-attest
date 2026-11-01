@@ -1,8 +1,5 @@
 # Publish a commitment, deliver its proof (0.4 — Glass Ocean)
 
-This guide describes the development version. Use the published 0.3.1 release
-until 0.4 is qualified and released.
-
 Glass Ocean lets a producer publish a commitment to a receipt's causal root
 in an independently operated log. A recipient can then check inclusion and
 compare two observed log checkpoints without contacting that log. Receipt

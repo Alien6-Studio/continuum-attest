@@ -209,3 +209,50 @@ transfers the resulting evidence and verifies it with recipient networking
 disabled. Log trust is transferred separately. Security-sensitive refusal
 tests are registered in the mutation gate and must fail when their protection
 is removed. No qualification uploads private project material to a public log.
+
+## 8. Retained file encodings and limits
+
+Files use UTF-8 JSON with unknown fields refused. JSON member order and
+whitespace carry no authority: bindings are checked from decoded values.
+All hexadecimal digests and openings use exactly 64 lower-case characters.
+The binary entry is 54 bytes and its retained hex representation is 108
+characters. These files are private evidence, not a log submission payload.
+
+`attest-publication/v1` has these mandatory fields:
+
+| Field | Meaning |
+| --- | --- |
+| `format` | Literal `attest-publication/v1` |
+| `causal_root` | Must equal the signed receipt's causal root |
+| `opening_nonce` | The private 32-byte commitment opening, hex encoded |
+| `entry` | Exact submitted binary entry, lower-case hex encoded |
+| `log_id` | SHA-256 of UTF-8 `attest-log/v1\n` + configured origin + `\n` + configured verifier key |
+| `submit_url` | Producer's configured submission endpoint; audit context, never recipient authority |
+| `created_at` | Producer-clock RFC 3339 timestamp; no trusted-time claim |
+| `submissions` | At most three objects with producer-clock `started_at` and nullable `returned_index` |
+| `outcome` | One of the two objects below |
+
+A confirmed outcome contains `status: "confirmed"`, unsigned integer
+`leaf_index`, the complete UTF-8 signed note in `checkpoint`, and
+`inclusion_path`, an ordered array of hex SHA-256 nodes. An unconfirmed
+outcome contains only `status: "unconfirmed"` and `reason`, one of `prepared`,
+`request-failed`, `service-refused`, `awaiting-inclusion`, `invalid-proof`,
+`deadline` or `attempt-limit`. These reasons are not operator-supplied text.
+Neither audit timestamps nor submission indices authenticate the submitter
+or establish inclusion.
+
+`attest-log-comparison/v1` contains `format`, `log_id`, `first_checkpoint`,
+`second_checkpoint` and `consistency_path`. Both checkpoints are complete
+signed notes, ordered by increasing tree size, and the path is an ordered
+array of hex SHA-256 nodes. The verifier authenticates both, verifies the path
+and matches the pair to the publication and recipient reference. Equal-size
+roots and signatures are still checked; an exchange never supplies trust or
+selects the recipient's independent reference.
+
+Publication records are bounded at 512 KiB and comparisons at 1 MiB. Each
+signed note is bounded at 128 KiB and 32 signatures. Tree sizes and leaf
+indices are unsigned 64-bit integers; inclusion requires a nonempty tree and
+an index strictly smaller than its size. Inclusion paths have at most 64
+nodes and consistency paths at most 65. Every node is consumed. C2SP hash
+tiles are bounded at 8,192 bytes; the online reader caches at most 512 tiles
+and permits at most 2,048 HTTP requests within the overall deadline.
