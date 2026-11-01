@@ -34,7 +34,7 @@ entry      = UTF8("attest-causal-root/v1\n") || commitment
 `\0` denotes one zero byte, `\n` one line-feed byte, and `||` concatenation.
 The entry contains the raw 32-byte commitment, without hex, JSON or base64.
 Its length is constant. No receipt identifier, project name, source revision,
-signing key, source file, build output, artifact or build log is submitted.
+signing key, source file, build output, artifact or build log is added to it.
 The root and nonce are retained with the evidence, not uploaded to the log.
 
 The producer generates a fresh nonce for each explicit publication operation.
@@ -51,7 +51,11 @@ the association. The evidence archive must use the delivery channel appropriate
 for its contents.
 
 The entry's prefix reveals use of this protocol. The operator observes the
-connection's source address, timing, request headers and repeated requests.
+requested URL, connection's source address, timing, request headers and
+repeated requests. Attest sets `User-Agent: continuum-attest/<version>` and
+`Content-Type: application/octet-stream`. Deployment-chosen hostnames and
+URL paths can themselves disclose identifiers; they are outside the opaque
+entry and must be included in the deployment's disclosure assessment.
 Readers can observe log ordering, indices, checkpoints, entry bytes and any
 operator metadata. Network observers can correlate traffic. The protocol
 does not provide traffic anonymity, conceal the number of publication
