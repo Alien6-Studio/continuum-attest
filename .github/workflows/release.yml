@@ -532,6 +532,10 @@ jobs:
             echo ".github/release-notes.md has no title line" >&2
             exit 1
           fi
+          if [ "${heading%% — *}" != "$version" ]; then
+            echo "release notes title does not match tag $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
           echo "title=$heading" >> "$GITHUB_OUTPUT"
 
           # The note lives in .github/release-notes.md so it can be read and
