@@ -110,7 +110,9 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(size)
         self.server.captures.append({"path": self.path, "entry": body.hex()})
         intent = json.loads(self.server.intent.read_text())
-        assert intent["entry"] == body.hex() and intent["submissions"], "disclosure preceded durable intent"
+        if intent["entry"] != body.hex() or not intent["submissions"]:
+            self.server.intent_failures.append(self.path)
+            return self.reply(500)
         if not body.startswith(ENTRY_PREFIX) or len(body) != len(ENTRY_PREFIX) + 32:
             return self.reply(400)
         if self.path == "/refused/add":
@@ -174,7 +176,7 @@ def main():
         proxy.daemon_threads = True
         proxy.backend = backend_port
         proxy.base = f"https://127.0.0.1:{proxy.server_port}"
-        proxy.captures, proxy.forbidden_reads = [], []
+        proxy.captures, proxy.forbidden_reads, proxy.intent_failures = [], [], []
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(control / "server.pem", control / "server.key")
         proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
@@ -287,6 +289,7 @@ def main():
         status = json.loads((directory / "status.json").read_text())
         assert status["build_exit_code"] == 37 and status["log_publication_status"] == "skipped"
         assert len(proxy.captures) == before
+        assert not proxy.intent_failures, "disclosure preceded durable intent"
         for item in proxy.captures:
             entry = bytes.fromhex(item["entry"])
             assert entry.startswith(ENTRY_PREFIX) and len(entry) == len(ENTRY_PREFIX) + 32
