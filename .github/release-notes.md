@@ -81,20 +81,6 @@ gh attestation verify attest-v0.3.1-linux-x86_64.tar.gz \
 The release includes signatures and signed, timestamped receipts connecting
 the published files to this build.
 
-## What a receipt does not establish
-
-Verification checks declared files and evidence against the recipient's trust
-and requirements. It does not prove that the runner was uncompromised or that
-the software is correct. An offline recipient also cannot learn about trust
-updates they have not received.
-
-The handoff has been exercised on GitHub Actions and self-managed GitLab,
-including offline acceptance and both refusal cases in
-[#25](https://github.com/Alien6-Studio/continuum-attest/issues/25).
-Self-managed GitLab needs signing infrastructure that recognizes its issuer.
-The GitLab qualification used temporary test trust; it does not provide a
-production signing service.
-
 [ROADMAP.md](https://github.com/Alien6-Studio/continuum-attest/blob/v0.3.1/ROADMAP.md)
 describes the remaining milestones.
 

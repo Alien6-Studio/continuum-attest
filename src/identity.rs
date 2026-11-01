@@ -298,6 +298,8 @@ fn check_cosign_version(cosign: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Decode the public X.509 leaf carried as verification material in a Sigstore
+/// bundle. This function does not read a signing key or a provider's OIDC token.
 fn bundle_certificate(bytes: &[u8]) -> Result<Vec<u8>> {
     let bundle: serde_json::Value =
         serde_json::from_slice(bytes).context("invalid Sigstore bundle JSON")?;
@@ -377,6 +379,8 @@ impl<'a> Der<'a> {
     }
 }
 
+/// Extract certified repository/revision metadata from public verification
+/// material. Errors describe the structure, without embedding certificate bytes.
 fn certificate_source(bytes: &[u8]) -> Result<(String, String)> {
     let mut outer = Der(bytes);
     let mut certificate = Der(outer.take(0x30)?);

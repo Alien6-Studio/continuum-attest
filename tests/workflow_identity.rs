@@ -88,6 +88,7 @@ fn signing_failure_never_exposes_token_or_leaves_a_bundle() {
     let dir = fixture(
         r#"#!/bin/sh
 if [ "$1" = version ]; then echo 'GitVersion: v3.1.4'; exit 0; fi
+echo "$SIGSTORE_ID_TOKEN"
 echo "$SIGSTORE_ID_TOKEN" >&2
 exit 42
 "#,
@@ -105,6 +106,7 @@ exit 42
         ])
         .assert()
         .code(2)
+        .stdout(predicate::str::contains("secret-from-provider").not())
         .stderr(predicate::str::contains("workflow signing failed"))
         .stderr(predicate::str::contains("secret-from-provider").not());
     assert!(!dir.path().join("proof.json").exists());
