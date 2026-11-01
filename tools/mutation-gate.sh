@@ -626,7 +626,7 @@ mutate "publication: required inclusion rejects unconfirmed delivery" src/verify
   'old = "            | Requirement::LogInclusion\n"
 assert s.count(old) == 1
 new = s.replace(old, "")
-old = "            Requirement::Linkage =>"
+old = "            Requirement::Linkage => check_reason(verdict, \"chain-linkage\"),"
 assert new.count(old) == 1
 new = new.replace(old, "            Requirement::LogInclusion => None,\n" + old)'
 

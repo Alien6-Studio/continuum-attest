@@ -279,6 +279,14 @@ def main():
             assert status["log_publication_reason"] and status["publication_status"] == "skipped"
             intent = json.loads(proxy.intent.read_text())
             assert intent["opening_nonce"] not in completed.stdout + completed.stderr
+        directory = producer / "ci-failed-build"
+        environment.update(ATTEST_EVIDENCE_DIR=str(directory), ATTEST_LOG_PUBLICATION_POLICY="required",
+                           ATTEST_COMMAND="exit 37", ATTEST_OUTPUTS="")
+        before = len(proxy.captures)
+        command([sys.executable, args.runner.resolve()], producer, 37, env=environment)
+        status = json.loads((directory / "status.json").read_text())
+        assert status["build_exit_code"] == 37 and status["log_publication_status"] == "skipped"
+        assert len(proxy.captures) == before
         for item in proxy.captures:
             entry = bytes.fromhex(item["entry"])
             assert entry.startswith(ENTRY_PREFIX) and len(entry) == len(ENTRY_PREFIX) + 32

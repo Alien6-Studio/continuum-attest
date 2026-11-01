@@ -94,10 +94,7 @@ impl<'a, S: TileSource> TileReader<'a, S> {
                 bytes.len() == received_width * 32 && bytes.len() <= TILE_BYTES,
                 "invalid hash tile length"
             );
-            let mut hashes = Vec::with_capacity(received_width);
-            for bytes in bytes.chunks_exact(32) {
-                hashes.push(bytes.try_into().context("invalid tile hash length")?);
-            }
+            let hashes = bytes.as_chunks::<32>().0.to_vec();
             self.cache.insert((level, tile_index), hashes);
         }
         let tile = self
@@ -107,7 +104,9 @@ impl<'a, S: TileSource> TileReader<'a, S> {
         let mut level = tile[offset..offset + count].to_vec();
         while level.len() > 1 {
             level = level
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| merkle::node_hash(&pair[0], &pair[1]))
                 .collect();
         }

@@ -53,12 +53,18 @@ jobs:
           python3 tools/qualify-publication.py --attest target/debug/attest \
             --tessera "$RUNNER_TEMP/tessera-log" --keygen "$RUNNER_TEMP/publication-fixtures" \
             --output "$RUNNER_TEMP/publication-qualification"
+      - name: Removing producer protections must fail the real qualification
+        run: |
+          python3 tools/publication-mutation-gate.py \
+            --tessera "$RUNNER_TEMP/tessera-log" --keygen "$RUNNER_TEMP/publication-fixtures" \
+            --output "$RUNNER_TEMP/publication-producer-mutations"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: publication-qualification
           path: |
             ${{ runner.temp }}/publication-qualification/qualification.json
             ${{ runner.temp }}/publication-qualification/recipient/
+            ${{ runner.temp }}/publication-producer-mutations/mutations.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
