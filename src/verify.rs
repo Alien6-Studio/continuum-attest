@@ -66,10 +66,16 @@ pub enum Requirement {
     Artifacts,
     /// Every referenced capsule has its matching manifest.
     Capsule,
+    /// Inclusion of the receipt's causal-root commitment in a configured log.
+    #[serde(rename = "log-inclusion")]
+    LogInclusion,
+    /// Comparison with a recipient-supplied authenticated log checkpoint.
+    #[serde(rename = "log-consistency")]
+    LogConsistency,
 }
 
 impl Requirement {
-    pub const ALL: [Requirement; 12] = [
+    pub const ALL: [Requirement; 14] = [
         Requirement::Signature,
         Requirement::Timestamp,
         Requirement::Recompute,
@@ -82,6 +88,8 @@ impl Requirement {
         Requirement::Identity,
         Requirement::Artifacts,
         Requirement::Capsule,
+        Requirement::LogInclusion,
+        Requirement::LogConsistency,
     ];
 
     pub fn name(self) -> &'static str {
@@ -98,6 +106,8 @@ impl Requirement {
             Requirement::Identity => "identity",
             Requirement::Artifacts => "artifacts",
             Requirement::Capsule => "capsule",
+            Requirement::LogInclusion => "log-inclusion",
+            Requirement::LogConsistency => "log-consistency",
         }
     }
 }
@@ -251,6 +261,8 @@ pub fn apply_policy(verdict: &mut ReceiptVerdict, policy: &Policy) {
             | Requirement::Identity
             | Requirement::Artifacts
             | Requirement::Capsule
+            | Requirement::LogInclusion
+            | Requirement::LogConsistency
             | Requirement::Revision => check_reason(verdict, requirement.name()),
             Requirement::Linkage => check_reason(verdict, "chain-linkage"),
             Requirement::Trust => match &verdict.trust_material {

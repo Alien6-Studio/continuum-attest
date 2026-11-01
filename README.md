@@ -299,7 +299,7 @@ to ask you to trust an unattested download.
 
 ## Status
 
-Version 0.3 — Ember Sky. Existing GitHub and GitLab jobs can wrap their
+Version 0.4 — Glass Ocean. Existing GitHub and GitLab jobs can wrap their
 build command, sign its receipt, and publish a release evidence archive. The
 recipient verifies artifact bytes and successful execution offline against
 independently configured keys. An optional Sigstore bundle establishes the
@@ -316,6 +316,12 @@ available. The release archive uses [`attest-evidence/v2`](docs/evidence-format.
 its verdict includes artifact, workflow identity, capsule and causal completeness
 checks and is separate from the
 receipt-file JSON schema.
+
+**Glass Ocean** adds explicit causal-root commitment publication and offline
+inclusion/checkpoint comparison. The
+[publication guide](docs/publication.md) documents the disclosure decision,
+independent log trust and optional CI integration. Log publication stays off
+until explicitly configured; building alone does not send a log entry.
 
 Interfaces that carry a `schema_version` (receipts, `attest.yaml`) follow a
 documented compatibility policy: older receipts stay verifiable, and a receipt

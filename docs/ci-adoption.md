@@ -20,6 +20,10 @@ configured Sigstore transparency log. It does not upload the source tree or
 the packaged artifacts. This identity proof does not publish the receipt's
 causal ledger root as specified by the separate 0.4 milestone.
 
+For the opt-in causal-root publication being developed in 0.4, see the
+[publication guide](publication.md). Its `log-publication-*` outcomes are
+separate from the artifact-upload `publication-*` outcomes documented here.
+
 ## Producer trust and signing boundary
 
 Provision the release key before the job: its private PEM is

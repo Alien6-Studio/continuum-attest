@@ -30,6 +30,15 @@ inputs:
   evidence-policy:
     description: "required fails a successful build on evidence failure; optional reports the failure without failing it"
     default: "required"
+  log-publication-policy:
+    description: "Explicit irreversible log publication: off, required or optional (requires attest 0.4+)"
+    default: "off"
+  log-config:
+    description: "Independent log configuration file; required when log publication is enabled"
+    default: ""
+  log-timeout-secs:
+    description: "Overall publication deadline, 1–120 seconds"
+    default: "30"
   trust-store:
     description: "Independent public trust directory for verification (default WORKSPACE/.attest/trust)"
     default: ""
@@ -84,6 +93,19 @@ outputs:
     description: "Local path of the self-contained evidence archive"
     value: ${{ steps.build.outputs.evidence }}
 
+  log-publication-policy:
+    description: "off, required or optional"
+    value: ${{ steps.finish.outputs.log-publication-policy }}
+  log-publication-status:
+    description: "confirmed, unconfirmed, skipped or error"
+    value: ${{ steps.finish.outputs.log-publication-status }}
+  log-publication-reason:
+    description: "Fixed reason when inclusion is unconfirmed"
+    value: ${{ steps.finish.outputs.log-publication-reason }}
+  log-publication-record:
+    description: "Private local publication record path"
+    value: ${{ steps.finish.outputs.log-publication-record }}
+
 runs:
   using: "composite"
   steps:
@@ -117,6 +139,9 @@ runs:
         ATTEST_KEY: ${{ inputs.key }}
         ATTEST_IDENTITY: ${{ inputs.identity }}
         ATTEST_EXTRA_ARGS: ${{ inputs.extra-args }}
+        ATTEST_LOG_PUBLICATION_POLICY: ${{ inputs.log-publication-policy }}
+        ATTEST_LOG_CONFIG: ${{ inputs.log-config }}
+        ATTEST_LOG_TIMEOUT_SECS: ${{ inputs.log-timeout-secs }}
         ATTEST_EVIDENCE_POLICY: ${{ inputs.evidence-policy }}
         ATTEST_TRUST_STORE: ${{ inputs.trust-store }}
         ATTEST_IDENTITY_POLICY: ${{ inputs.identity-policy }}

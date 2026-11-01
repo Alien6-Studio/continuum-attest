@@ -16,6 +16,7 @@ use crate::verify::{Check, CheckStatus, Policy, ReceiptVerdict, Requirement, Ver
 mod proofs;
 
 pub const EVIDENCE_FORMAT: &str = "attest-evidence/v2";
+pub const EVIDENCE_PUBLICATION_FORMAT: &str = "attest-evidence/v3";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,6 +171,30 @@ pub fn pack_with_capsules(
     identity_bundle: Option<&Path>,
     capsules: &[std::path::PathBuf],
 ) -> Result<()> {
+    pack_with_publication(
+        receipt_path,
+        workspace,
+        output,
+        identity_bundle,
+        capsules,
+        None,
+        None,
+    )
+}
+
+pub fn pack_with_publication(
+    receipt_path: &Path,
+    workspace: &Path,
+    output: &Path,
+    identity_bundle: Option<&Path>,
+    capsules: &[std::path::PathBuf],
+    publication: Option<&Path>,
+    comparison: Option<&Path>,
+) -> Result<()> {
+    ensure!(
+        comparison.is_none() || publication.is_some(),
+        "checkpoint comparison needs publication evidence"
+    );
     let bytes =
         crate::verify::read_bounded(receipt_path, crate::verify::MAX_RECEIPT_BYTES, "receipt")?;
     let receipt: Receipt = serde_yaml::from_slice(&bytes).context("invalid receipt")?;
@@ -195,6 +220,34 @@ pub fn pack_with_capsules(
     );
     inventory(&receipt)?;
     let mut files = proofs::collect(&receipt, workspace, capsules)?;
+    if let Some(path) = publication {
+        let bytes = crate::verify::read_bounded(
+            path,
+            crate::publication::record::MAX_RECORD_BYTES,
+            "publication record",
+        )?;
+        let record = crate::publication::record::decode_record(&bytes)?;
+        record.entry_bytes(
+            receipt
+                .causal_chain_hash
+                .as_deref()
+                .context("receipt has no causal root")?,
+        )?;
+        files.insert("publication.json".into(), bytes);
+        if let Some(path) = comparison {
+            let bytes = crate::verify::read_bounded(
+                path,
+                crate::publication::record::MAX_COMPARISON_BYTES,
+                "checkpoint comparison",
+            )?;
+            let parsed = crate::publication::record::decode_comparison(&bytes)?;
+            ensure!(
+                parsed.format == crate::publication::record::COMPARISON_FORMAT,
+                "unsupported checkpoint comparison format"
+            );
+            files.insert("log-consistency.json".into(), bytes);
+        }
+    }
     let mut size = bytes.len() as u64 + files.values().map(|bytes| bytes.len() as u64).sum::<u64>();
     for artifact in artifacts(&receipt)? {
         let bytes = artifact_bytes(workspace, artifact)?;
@@ -219,7 +272,12 @@ pub fn pack_with_capsules(
     files.insert(
         "manifest.json".into(),
         serde_json::to_vec(&Manifest {
-            format: EVIDENCE_FORMAT.into(),
+            format: if publication.is_some() {
+                EVIDENCE_PUBLICATION_FORMAT
+            } else {
+                EVIDENCE_FORMAT
+            }
+            .into(),
         })?,
     );
     if let Some(bundle) = identity_bundle {
@@ -294,6 +352,24 @@ pub fn verify_with_policy(
     artifact_root: Option<&Path>,
     policy: &Policy,
 ) -> Result<ReceiptVerdict> {
+    verify_with_policy_and_log(
+        archive,
+        trust_store,
+        identity_policy,
+        artifact_root,
+        policy,
+        &crate::publication::record::VerificationMaterial::default(),
+    )
+}
+
+pub fn verify_with_policy_and_log(
+    archive: &Path,
+    trust_store: &Path,
+    identity_policy: Option<&crate::identity::IdentityPolicy>,
+    artifact_root: Option<&Path>,
+    policy: &Policy,
+    log_material: &crate::publication::record::VerificationMaterial<'_>,
+) -> Result<ReceiptVerdict> {
     let entries = crate::archive::read_archive(archive)?;
     let files: BTreeMap<_, _> = entries
         .iter()
@@ -305,7 +381,9 @@ pub fn verify_with_policy(
             .context("missing evidence manifest")?,
     )?;
     ensure!(
-        manifest.format == EVIDENCE_FORMAT || manifest.format == "attest-evidence/v1",
+        manifest.format == EVIDENCE_FORMAT
+            || manifest.format == "attest-evidence/v1"
+            || manifest.format == EVIDENCE_PUBLICATION_FORMAT,
         "unsupported evidence format {}",
         manifest.format
     );
@@ -348,6 +426,16 @@ pub fn verify_with_policy(
             .into_iter()
             .map(String::from)
             .collect();
+        if manifest.format == EVIDENCE_PUBLICATION_FORMAT {
+            ensure!(
+                files.contains_key("publication.json"),
+                "v3 evidence is missing publication.json"
+            );
+            expected.insert("publication.json".into());
+            if files.contains_key("log-consistency.json") {
+                expected.insert("log-consistency.json".into());
+            }
+        }
         if files.contains_key("identity.sigstore.json") {
             expected.insert("identity.sigstore.json".into());
         }
@@ -435,6 +523,37 @@ pub fn verify_with_policy(
             status: CheckStatus::Skipped,
             detail: "no workflow identity policy supplied by recipient".into(),
         });
+    }
+    let log_requested = options.policy.required.iter().any(|requirement| {
+        matches!(
+            requirement,
+            Requirement::LogInclusion | Requirement::LogConsistency
+        )
+    });
+    if manifest.format == EVIDENCE_PUBLICATION_FORMAT
+        || log_requested
+        || log_material.trust.is_some()
+        || log_material.reference_checkpoint.is_some()
+        || log_material.comparison.is_some()
+    {
+        let root = serde_yaml::from_slice::<Receipt>(receipt_bytes)
+            .ok()
+            .and_then(|receipt| receipt.causal_chain_hash);
+        let material = crate::publication::record::VerificationMaterial {
+            comparison: log_material
+                .comparison
+                .or_else(|| files.get("log-consistency.json").copied()),
+            ..*log_material
+        };
+        verdict.checks.extend(crate::publication::record::assess(
+            root.as_deref(),
+            if manifest.format == EVIDENCE_PUBLICATION_FORMAT {
+                files.get("publication.json").copied()
+            } else {
+                None
+            },
+            &material,
+        ));
     }
     crate::verify::apply_policy(&mut verdict, &options.policy);
     Ok(verdict)

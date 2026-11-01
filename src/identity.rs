@@ -292,7 +292,7 @@ fn check_cosign_version(cosign: &Path) -> Result<()> {
             .parse::<u32>()
             .ok()
     });
-    if !major.is_some_and(|major| major >= 3) {
+    if major.is_none_or(|major| major < 3) {
         bail!("workflow identity requires cosign 3 or newer");
     }
     Ok(())

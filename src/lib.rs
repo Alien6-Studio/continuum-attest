@@ -15,6 +15,7 @@ pub mod interop;
 pub mod keys;
 pub mod pipeline;
 pub mod provenance;
+pub mod publication;
 pub mod sandbox;
 pub mod storage;
 pub mod trust;

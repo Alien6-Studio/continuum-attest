@@ -40,6 +40,11 @@ elif args[:2] == ["identity", "sign"]:
     if os.environ.get("IDENTITY_FAILURE"):
         sys.exit(2)
     pathlib.Path(args[args.index("--bundle") + 1]).write_text("public Sigstore bundle")
+elif args[:2] == ["causal", "publish"]:
+    state = "unconfirmed" if os.environ.get("LOG_UNCONFIRMED") else "confirmed"
+    pathlib.Path(args[args.index("--output") + 1]).write_text(json.dumps({"outcome": {"status": state}}))
+    print(json.dumps({"status": state, "reason": "deadline" if state == "unconfirmed" else None}))
+    sys.exit(3 if state == "unconfirmed" and args[args.index("--publication-policy") + 1] == "required" else 0)
 elif args[:2] == ["evidence", "pack"]:
     if os.environ.get("PACK_FAILURE"):
         sys.exit(2)
@@ -107,6 +112,48 @@ class RunnerTests(unittest.TestCase):
         result = self.invoke(ATTEST_COMMAND="exit 37", PACK_FAILURE="1")
         self.assertEqual(result.returncode, 37, result.stderr)
         self.assertEqual(self.status()["evidence_status"], "failed")
+
+    def log_settings(self, policy):
+        config = self.root / "log.json"
+        config.write_text("{}")
+        return {"ATTEST_LOG_PUBLICATION_POLICY": policy, "ATTEST_LOG_CONFIG": str(config)}
+
+    def test_log_publication_is_explicit_and_follows_signing(self):
+        result = self.invoke(**self.log_settings("required"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.invocations()
+        self.assertEqual(calls[1][0], "sign")
+        self.assertEqual(calls[2][:2], ["causal", "publish"])
+        self.assertIn("--publication", calls[3])
+        self.assertIn("--log-trust", calls[4])
+        self.assertIn("log-inclusion", calls[4])
+        self.assertEqual(self.status()["log_publication_status"], "confirmed")
+        self.assertEqual(self.status()["publication_status"], "skipped")
+
+    def test_required_log_failure_wins_over_optional_evidence_policy(self):
+        result = self.invoke(**self.log_settings("required"), LOG_UNCONFIRMED="1",
+                             ATTEST_EVIDENCE_POLICY="optional")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertEqual(self.status()["evidence_status"], "produced")
+        self.assertEqual(self.status()["log_publication_reason"], "deadline")
+
+    def test_optional_log_failure_is_retained_without_failing_build(self):
+        result = self.invoke(**self.log_settings("optional"), LOG_UNCONFIRMED="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.status()["log_publication_status"], "unconfirmed")
+        self.assertIn("--publication", self.invocations()[3])
+        self.assertNotIn("log-inclusion", self.invocations()[4])
+
+    def test_failed_build_never_discloses_to_log_and_retains_its_exit_code(self):
+        result = self.invoke(**self.log_settings("required"), ATTEST_COMMAND="exit 37")
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertFalse(any(call[:2] == ["causal", "publish"] for call in self.invocations()))
+        self.assertEqual(self.status()["log_publication_status"], "skipped")
+
+    def test_log_configuration_without_explicit_policy_refuses_before_build(self):
+        result = self.invoke(ATTEST_LOG_CONFIG="log.json")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.root / "invocations.jsonl").exists())
 
     def test_build_failure_wins_over_sign_failure(self):
         result = self.invoke(ATTEST_COMMAND="exit 39", SIGN_FAILURE="1")

@@ -241,30 +241,17 @@ steps:
         .success();
 }
 
-/// `attest image verify` hard-fails when the cosign binary is missing, so
-/// these tests can only run where cosign is installed (not on CI runners).
-fn cosign_available() -> bool {
-    std::process::Command::new("cosign")
-        .arg("version")
-        .output()
-        .is_ok()
-}
-
 #[test]
 fn test_image_verify_command() {
-    if !cosign_available() {
-        eprintln!("Skipping test_image_verify_command: cosign not installed");
-        return;
-    }
-    // Test image verification with a common image
+    // This is a local usage refusal, before cosign or a registry is contacted.
     let mut cmd = Command::cargo_bin("attest").unwrap();
     cmd.arg("image")
         .arg("verify")
         .arg("alpine:latest")
         .timeout(std::time::Duration::from_secs(30))
         .assert()
-        .success()
-        .stdout(predicates::str::contains("Verifying container image"));
+        .code(2)
+        .stderr(predicates::str::contains("requires at least one property"));
 }
 
 #[test]
