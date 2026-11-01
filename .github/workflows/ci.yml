@@ -18,6 +18,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  offline-publication:
+    name: Tessera publication and offline recipient
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.10"
+          cache: false
+      - name: Build pinned independent Tessera implementation
+        env:
+          TESSERA_REVISION: 97031af5a3c83a4dddde0675879207eb17c9ec22
+        run: |
+          set -euo pipefail
+          git init "$RUNNER_TEMP/tessera"
+          git -C "$RUNNER_TEMP/tessera" remote add origin https://github.com/transparency-dev/tessera.git
+          git -C "$RUNNER_TEMP/tessera" fetch --depth 1 origin "$TESSERA_REVISION"
+          git -C "$RUNNER_TEMP/tessera" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/tessera" rev-parse HEAD)" = "$TESSERA_REVISION"
+          cd "$RUNNER_TEMP/tessera"
+          go build -mod=readonly -o "$RUNNER_TEMP/tessera-log" ./cmd/conformance/posix
+      - name: Build test key generator and Attest
+        run: |
+          (cd tools/publication-fixtures && go build -mod=readonly -o "$RUNNER_TEMP/publication-fixtures" .)
+          cargo build --bin attest --locked
+      - name: Publish synthetic commitments, transfer, remove producer and verify with no network
+        run: |
+          python3 tools/qualify-publication.py --attest target/debug/attest \
+            --tessera "$RUNNER_TEMP/tessera-log" --keygen "$RUNNER_TEMP/publication-fixtures" \
+            --output "$RUNNER_TEMP/publication-qualification"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publication-qualification
+          path: |
+            ${{ runner.temp }}/publication-qualification/qualification.json
+            ${{ runner.temp }}/publication-qualification/recipient/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
   ci-integrations:
     name: CI integration wrappers
     runs-on: ubuntu-latest

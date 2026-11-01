@@ -142,6 +142,11 @@ impl CausalLedger {
 
     /// Initialize the causal ledger storage
     pub async fn init(&self) -> Result<()> {
+        self.init_local()
+    }
+
+    /// Initialize filesystem storage from synchronous callers such as wrap.
+    pub fn init_local(&self) -> Result<()> {
         fs::create_dir_all(&self.ledger_dir)?;
         fs::create_dir_all(self.ledger_dir.join("events"))?;
         fs::create_dir_all(self.ledger_dir.join("chains"))?;
@@ -184,6 +189,37 @@ impl CausalLedger {
         environment_hash: &str,
         metadata: HashMap<String, String>,
     ) -> Result<CausalEvent> {
+        let event = self.record_event_local(
+            step_name,
+            causal_parents,
+            input_hash,
+            output_hash,
+            exit_code,
+            pipeline_hash,
+            environment_hash,
+            metadata,
+        )?;
+        tracing::info!(
+            "Recorded causal event: {} for step: {}",
+            event.event_id,
+            step_name
+        );
+        Ok(event)
+    }
+
+    /// Record local evidence without requiring an asynchronous runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_event_local(
+        &mut self,
+        step_name: &str,
+        causal_parents: Vec<String>,
+        input_hash: &str,
+        output_hash: &str,
+        exit_code: i32,
+        pipeline_hash: &str,
+        environment_hash: &str,
+        metadata: HashMap<String, String>,
+    ) -> Result<CausalEvent> {
         let mut event = CausalEvent {
             // Filled in below, once the fields it commits to exist.
             event_id: String::new(),
@@ -212,18 +248,12 @@ impl CausalLedger {
         // Generate Merkle proof
 
         // Store event
-        self.store_event(&event).await?;
+        self.store_event_local(&event)?;
 
         // Update indices
         self.events_index.insert(event_id.clone(), event.clone());
         self.dependency_graph
             .insert(event_id.clone(), causal_parents);
-
-        tracing::info!(
-            "Recorded causal event: {} for step: {}",
-            event_id,
-            step_name
-        );
 
         Ok(event)
     }
@@ -250,6 +280,10 @@ impl CausalLedger {
 
     /// Store event to disk
     async fn store_event(&self, event: &CausalEvent) -> Result<()> {
+        self.store_event_local(event)
+    }
+
+    fn store_event_local(&self, event: &CausalEvent) -> Result<()> {
         let event_file = self
             .ledger_dir
             .join("events")

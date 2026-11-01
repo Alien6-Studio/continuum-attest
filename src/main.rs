@@ -741,6 +741,12 @@ enum ImageCommands {
 
 #[derive(Subcommand)]
 enum CausalCommands {
+    /// Explicitly publish an irreversible causal-root commitment and retain its proof
+    Publish(CausalPublishArgs),
+
+    /// Fetch a proof connecting two independently authenticated log checkpoints
+    FetchConsistency(ConsistencyFetchArgs),
+
     /// Query causal path between two events
     Path {
         #[arg(value_name = "FROM_EVENT", help = "Source event ID")]
@@ -799,6 +805,42 @@ enum CausalCommands {
 }
 
 #[derive(clap::Args)]
+struct CausalPublishArgs {
+    #[arg(long)]
+    receipt: std::path::PathBuf,
+    #[arg(long)]
+    log_config: std::path::PathBuf,
+    #[arg(
+        short,
+        long,
+        help = "Private retained publication record; matching records can resume"
+    )]
+    output: std::path::PathBuf,
+    #[arg(long, default_value = ".attest/trust")]
+    trust_store: std::path::PathBuf,
+    #[arg(long, value_parser = ["required", "optional"], help = "Explicitly choose whether unconfirmed inclusion fails this command")]
+    publication_policy: String,
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
+    timeout_secs: u64,
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    format: String,
+}
+
+#[derive(clap::Args)]
+struct ConsistencyFetchArgs {
+    #[arg(long)]
+    first_checkpoint: std::path::PathBuf,
+    #[arg(long)]
+    second_checkpoint: std::path::PathBuf,
+    #[arg(long)]
+    log_config: std::path::PathBuf,
+    #[arg(short, long)]
+    output: std::path::PathBuf,
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=120))]
+    timeout_secs: u64,
+}
+
+#[derive(clap::Args)]
 struct ExportIdentityArgs {
     #[arg(long, requires = "identity_policy")]
     identity_bundle: Option<std::path::PathBuf>,
@@ -818,6 +860,23 @@ struct ImportEvidenceArgs {
     report: String,
 }
 
+#[derive(clap::Args, Default)]
+struct LogVerificationArgs {
+    #[arg(
+        long,
+        help = "Recipient's independently configured log origin and verifier key"
+    )]
+    log_trust: Option<std::path::PathBuf>,
+    #[arg(
+        long,
+        requires = "log_trust",
+        help = "Recipient's retained or independently obtained signed checkpoint"
+    )]
+    log_checkpoint: Option<std::path::PathBuf>,
+    #[arg(long, requires_all = ["log_trust", "log_checkpoint"], help = "Explicit checkpoint comparison file, overriding an archived copy")]
+    log_consistency: Option<std::path::PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum EvidenceCommands {
     /// Package a signed receipt and its declared artifacts for offline transfer
@@ -831,6 +890,17 @@ enum EvidenceCommands {
         identity_bundle: Option<std::path::PathBuf>,
         #[arg(long, help = "Capsule manifest referenced by the receipt (repeatable)")]
         capsule_manifest: Vec<std::path::PathBuf>,
+        #[arg(
+            long,
+            help = "Retained private log-publication record; enables evidence v3"
+        )]
+        publication: Option<std::path::PathBuf>,
+        #[arg(
+            long,
+            requires = "publication",
+            help = "Retained checkpoint comparison material"
+        )]
+        log_consistency: Option<std::path::PathBuf>,
     },
     /// Require trusted signature, successful build and matching artifact bytes
     Verify {
@@ -854,6 +924,8 @@ enum EvidenceCommands {
         require: Vec<String>,
         #[arg(long, default_value = "text", value_parser = ["text", "json"])]
         format: String,
+        #[command(flatten)]
+        log: LogVerificationArgs,
     },
 }
 
@@ -1504,6 +1576,10 @@ async fn main() -> Result<()> {
         }
 
         Commands::Causal { action } => match action {
+            CausalCommands::Publish(args) => std::process::exit(handle_causal_publish(args).await),
+            CausalCommands::FetchConsistency(args) => {
+                std::process::exit(handle_consistency_fetch(args).await)
+            }
             CausalCommands::Path {
                 from_event,
                 to_event,
@@ -1825,6 +1901,132 @@ fn read_identity_policy(path: &std::path::Path) -> Result<attest::identity::Iden
     Ok(policy)
 }
 
+fn read_log_config(path: &std::path::Path) -> Result<attest::publication::note::LogConfig> {
+    let bytes = attest::verify::read_bounded(path, 64 * 1024, "log configuration")?;
+    let mut config: attest::publication::note::LogConfig = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid log configuration JSON"))?;
+    if let Some(ca) = config.tls_ca.as_mut() {
+        if ca.is_relative() {
+            *ca = path.parent().unwrap_or(std::path::Path::new(".")).join(&ca);
+        }
+    }
+    config.validate()?;
+    Ok(config)
+}
+
+async fn handle_causal_publish(args: CausalPublishArgs) -> i32 {
+    use attest::publication::record::PublicationState;
+    let result = async {
+        let config = read_log_config(&args.log_config)?;
+        let record = attest::publication::client::publish(
+            &args.receipt,
+            &args.trust_store,
+            &config,
+            &args.output,
+            std::time::Duration::from_secs(args.timeout_secs),
+        )
+        .await?;
+        let (status, reason, index, size) = match &record.outcome {
+            PublicationState::Confirmed { leaf_index, .. } => {
+                let checkpoint = record.verify(&record.causal_root, &config)?;
+                (
+                    "confirmed",
+                    None,
+                    Some(*leaf_index),
+                    Some(checkpoint.tree_size),
+                )
+            }
+            PublicationState::Unconfirmed { reason } => ("unconfirmed", Some(*reason), None, None),
+        };
+        if args.format == "json" {
+            // The opening nonce and receipt root must not leak into CI logs.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "format":"attest-publication-result/v1", "status":status,
+                    "log_id":record.log_id, "record":args.output,
+                    "leaf_index":index, "tree_size":size, "reason":reason,
+                    "submission_attempts":record.submissions.len(),
+                })
+            );
+        } else {
+            println!(
+                "log publication {status}; private record: {}",
+                args.output.display()
+            );
+            if let Some(reason) = reason {
+                eprintln!("{}", reason.description());
+            }
+        }
+        Ok::<_, anyhow::Error>(
+            if status == "unconfirmed" && args.publication_policy == "required" {
+                3
+            } else {
+                0
+            },
+        )
+    }
+    .await;
+    match result {
+        Ok(code) => code,
+        Err(error) => {
+            if args.format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({"format":"attest-publication-result/v1", "status":"error", "error":format!("{error:#}")})
+                );
+            } else {
+                eprintln!("error: log publication failed: {error:#}");
+            }
+            2
+        }
+    }
+}
+
+async fn handle_consistency_fetch(args: ConsistencyFetchArgs) -> i32 {
+    let result = async {
+        let config = read_log_config(&args.log_config)?;
+        let read = |path: &std::path::Path| -> Result<String> {
+            let bytes = attest::verify::read_bounded(
+                path,
+                attest::publication::note::MAX_NOTE_BYTES as u64,
+                "checkpoint",
+            )?;
+            String::from_utf8(bytes)
+                .map_err(|_| anyhow::anyhow!("invalid checkpoint text encoding"))
+        };
+        let comparison = attest::publication::client::fetch_comparison(
+            &read(&args.first_checkpoint)?,
+            &read(&args.second_checkpoint)?,
+            &config,
+            std::time::Duration::from_secs(args.timeout_secs),
+        )
+        .await?;
+        let bytes = serde_json::to_vec_pretty(&comparison)?;
+        let parent = args
+            .output
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::Write::write_all(&mut staged, &bytes)?;
+        staged.as_file().sync_all()?;
+        staged
+            .persist_noclobber(&args.output)
+            .map_err(|error| error.error)?;
+        println!("{}", args.output.display());
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("error: checkpoint comparison acquisition failed: {error:#}");
+            2
+        }
+    }
+}
+
 fn handle_evidence(action: EvidenceCommands) -> i32 {
     match action {
         EvidenceCommands::Pack {
@@ -1833,13 +2035,17 @@ fn handle_evidence(action: EvidenceCommands) -> i32 {
             output,
             identity_bundle,
             capsule_manifest,
+            publication,
+            log_consistency,
         } => {
-            match attest::evidence::pack_with_capsules(
+            match attest::evidence::pack_with_publication(
                 &receipt,
                 &workspace,
                 &output,
                 identity_bundle.as_deref(),
                 &capsule_manifest,
+                publication.as_deref(),
+                log_consistency.as_deref(),
             ) {
                 Ok(()) => {
                     println!("{}", output.display());
@@ -1857,6 +2063,7 @@ fn handle_evidence(action: EvidenceCommands) -> i32 {
             artifact_root,
             require,
             format,
+            log,
         } => {
             let result = (|| -> Result<_> {
                 let policy = identity_policy
@@ -1879,12 +2086,43 @@ fn handle_evidence(action: EvidenceCommands) -> i32 {
                 } else {
                     attest::verify::Policy::parse(&require).map_err(anyhow::Error::msg)?
                 };
-                attest::evidence::verify_with_policy(
+                let trust = log.log_trust.as_deref().map(read_log_config).transpose()?;
+                let reference = log
+                    .log_checkpoint
+                    .as_deref()
+                    .map(|path| -> Result<String> {
+                        let bytes = attest::verify::read_bounded(
+                            path,
+                            attest::publication::note::MAX_NOTE_BYTES as u64,
+                            "reference checkpoint",
+                        )?;
+                        String::from_utf8(bytes)
+                            .map_err(|_| anyhow::anyhow!("invalid reference checkpoint encoding"))
+                    })
+                    .transpose()?;
+                let comparison = log
+                    .log_consistency
+                    .as_deref()
+                    .map(|path| {
+                        attest::verify::read_bounded(
+                            path,
+                            attest::publication::record::MAX_COMPARISON_BYTES,
+                            "checkpoint comparison",
+                        )
+                    })
+                    .transpose()?;
+                let material = attest::publication::record::VerificationMaterial {
+                    trust: trust.as_ref(),
+                    reference_checkpoint: reference.as_deref(),
+                    comparison: comparison.as_deref(),
+                };
+                attest::evidence::verify_with_policy_and_log(
                     &archive,
                     &trust_store,
                     policy.as_ref(),
                     artifact_root.as_deref(),
                     &requirements,
+                    &material,
                 )
             })();
             match result {
@@ -1956,6 +2194,15 @@ fn handle_verify(
             return 2;
         }
     };
+    if policy.required.iter().any(|r| {
+        matches!(
+            r,
+            attest::verify::Requirement::LogInclusion | attest::verify::Requirement::LogConsistency
+        )
+    }) {
+        eprintln!("error: log requirements use 'attest evidence verify' with retained publication material");
+        return 2;
+    }
     if format != "text" && format != "json" {
         eprintln!(
             "error: unsupported --format '{}' (expected text or json)",

@@ -564,6 +564,72 @@ assert s.count(old) == 2
 index = s.rfind(old)
 new = s[:index] + s[index:].replace(old, "{ let _ = &bytes; true }", 1)'
 
+mutate "publication: receipt root remains bound to opening" src/publication/record.rs \
+  publication_protocol opening_and_receipt_binding_are_independent_of_a_valid_log_proof \
+  'old = "self.causal_root == receipt_root,"
+assert s.count(old) == 1
+new = s.replace(old, "true,")
+old = "let entry = entry_for_root(receipt_root, &self.opening_nonce)?;"
+assert new.count(old) == 1
+new = new.replace(old, "let entry = entry_for_root(&self.causal_root, &self.opening_nonce)?;")'
+
+mutate "publication: pinned checkpoint signature authenticates text" src/publication/note.rs \
+  lib publication::note::tests::c2sp_published_note_vector_verifies_and_tampering_fails \
+  'old = "self.key\n                    .verify_strict(body.as_bytes(), &signature)\n                    .context(\"invalid signature from configured log key\")?;"
+assert s.count(old) == 1
+new = s.replace(old, "if false { " + old + " }")'
+
+mutate "publication: unknown checkpoint signer supplies no authority" src/publication/note.rs \
+  publication_protocol no_log_key_is_learned_from_evidence_and_unknown_signatures_cannot_authorize \
+  'old = "            authenticated,"
+assert s.count(old) == 1
+new = s.replace(old, "            true || authenticated,")'
+
+mutate "publication: entry inclusion binds checkpoint root" src/publication/merkle.rs \
+  publication_evidence altered_opening_checkpoint_index_and_extra_nodes_are_refused \
+  'old = "calculated == *root,"
+assert s.count(old) == 1
+new = s.replace(old, "true || calculated == *root,")'
+
+mutate "publication: inclusion consumes every node" src/publication/merkle.rs \
+  publication_evidence altered_opening_checkpoint_index_and_extra_nodes_are_refused \
+  'old = "remaining.next().is_none()"
+assert s.count(old) == 2
+new = s.replace(old, "true || remaining.next().is_none()", 1)'
+
+mutate "publication: consistency binds both roots" src/publication/merkle.rs \
+  publication_protocol rust_proofs_and_tile_reads_agree_with_go_across_tree_boundaries \
+  'old = "calculated_old == *old_root && calculated_new == *new_root,"
+assert s.count(old) == 1
+new = s.replace(old, "true || (calculated_old == *old_root && calculated_new == *new_root),")'
+
+mutate "publication: equal-size conflict is refused" src/publication/record.rs \
+  publication_protocol consistency_needs_the_recipients_reference_and_distinguishes_missing_from_conflict \
+  'old = "reference.tree_size != publication.tree_size || reference.root == publication.root,"
+assert s.count(old) == 1
+new = s.replace(old, "true || reference.tree_size != publication.tree_size || reference.root == publication.root,")'
+
+mutate "publication: exchange covers the recipient observation" src/publication/record.rs \
+  publication_protocol consistency_needs_the_recipients_reference_and_distinguishes_missing_from_conflict \
+  'old = "(same_checkpoint(&first, &reference) && same_checkpoint(&second, &publication))"
+assert s.count(old) == 1
+new = s.replace(old, "true || (same_checkpoint(&first, &reference) && same_checkpoint(&second, &publication))")'
+
+mutate "publication: missing comparison cannot pass policy" src/publication/record.rs \
+  publication_evidence a_missing_reference_is_distinct_from_verified_consistency \
+  'old = "let skipped = |detail: &str| check(\"log-consistency\", CheckStatus::Skipped, detail);"
+assert s.count(old) == 1
+new = s.replace(old, old.replace("CheckStatus::Skipped", "CheckStatus::Pass"))'
+
+mutate "publication: required inclusion rejects unconfirmed delivery" src/verify.rs \
+  publication_evidence missing_log_trust_or_missing_confirmation_cannot_satisfy_recipient_policy \
+  'old = "            | Requirement::LogInclusion\n"
+assert s.count(old) == 1
+new = s.replace(old, "")
+old = "            Requirement::Linkage =>"
+assert new.count(old) == 1
+new = new.replace(old, "            Requirement::LogInclusion => None,\n" + old)'
+
 # Deliberately not mutated: the archive's per-event id check is diagnostics,
 # not an independent protection. Since the chain root covers each event's full
 # content, a rewritten event already fails on the root; the id check exists so

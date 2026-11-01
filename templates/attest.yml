@@ -34,6 +34,16 @@ spec:
       default: required
       options: [required, optional]
       description: "Whether evidence failures fail a successful build"
+    log-publication-policy:
+      default: "off"
+      options: ["off", required, optional]
+      description: "Explicit irreversible log publication; requires attest 0.4+"
+    log-config:
+      default: ""
+      description: "Independent log configuration file"
+    log-timeout-secs:
+      default: "30"
+      description: "Overall publication deadline, 1–120 seconds"
     trust-store:
       default: ""
       description: "Independent public trust directory for verification"
@@ -62,6 +72,9 @@ spec:
     ATTEST_KEY: $[[ inputs.key ]]
     ATTEST_IDENTITY: "$[[ inputs.identity ]]"
     ATTEST_EXTRA_ARGS: $[[ inputs.extra-args ]]
+    ATTEST_LOG_PUBLICATION_POLICY: $[[ inputs.log-publication-policy ]]
+    ATTEST_LOG_CONFIG: $[[ inputs.log-config ]]
+    ATTEST_LOG_TIMEOUT_SECS: $[[ inputs.log-timeout-secs ]]
     ATTEST_EVIDENCE_POLICY: $[[ inputs.evidence-policy ]]
     ATTEST_TRUST_STORE: $[[ inputs.trust-store ]]
     ATTEST_IDENTITY_POLICY: $[[ inputs.identity-policy ]]
@@ -127,11 +140,17 @@ spec:
               return build
           if build is None:
               return status["wrapper_exit_code"] or 2
+          if (status.get("log_publication_policy") == "required"
+                  and status.get("log_publication_status") != "confirmed"):
+              return 3
+          errors = [error for error in status["errors"]
+                    if error["stage"] != "log_publication"
+                    or status.get("log_publication_policy") != "optional"]
           if status["evidence_policy"] == "required" and (
               status["evidence_status"] != "produced"
               or status["verification_status"] == "failed"
               or status["publication_status"] == "failed"
-              or status["errors"]
+              or errors
           ):
               return 2
           return 0
@@ -149,7 +168,8 @@ spec:
               (directory / "status.json").write_text(json.dumps(status, indent=2) + "\n")
               exported = {"ATTEST_" + key.upper(): status[key] for key in (
                   "build_exit_code", "build_status", "evidence_policy", "evidence_status",
-                  "verification_status", "publication_status", "publication_url", "error_code", "exit_code")}
+                  "verification_status", "publication_status", "publication_url", "error_code", "exit_code",
+                  "log_publication_policy", "log_publication_status", "log_publication_reason")}
               (directory / "status.env").write_text("".join(
                   f"{key}={'' if value is None else value}\n" for key, value in exported.items()))
           except OSError as error:
@@ -170,6 +190,10 @@ spec:
               "verification-status": status["verification_status"],
               "publication-status": status["publication_status"],
               "publication-url": status["publication_url"],
+              "log-publication-policy": status["log_publication_policy"],
+              "log-publication-status": status["log_publication_status"],
+              "log-publication-reason": status["log_publication_reason"],
+              "log-publication-record": status["log_publication_record"],
               "failure-stage": status["failure_stage"],
               "error-code": status["error_code"],
               "receipt": status["receipt"],
@@ -233,6 +257,17 @@ spec:
               raise ValueError("ATTEST_EVIDENCE_POLICY must be required or optional")
           if os.environ.get("ATTEST_IDENTITY", "false") not in ("true", "false"):
               raise ValueError("ATTEST_IDENTITY must be true or false")
+          log_policy = os.environ.get("ATTEST_LOG_PUBLICATION_POLICY", "off")
+          log_config = os.environ.get("ATTEST_LOG_CONFIG", "")
+          if log_policy not in ("off", "required", "optional"):
+              raise ValueError("ATTEST_LOG_PUBLICATION_POLICY must be off, required or optional")
+          if bool(log_config) != (log_policy != "off"):
+              raise ValueError("log publication requires both an explicit policy and a log configuration")
+          log_timeout = int(os.environ.get("ATTEST_LOG_TIMEOUT_SECS", "30"))
+          if not 1 <= log_timeout <= 120:
+              raise ValueError("ATTEST_LOG_TIMEOUT_SECS must be between 1 and 120")
+          if log_config and not Path(log_config).is_file():
+              raise ValueError("log configuration file is missing")
           configured = os.environ.get("ATTEST_EVIDENCE_DIR")
           if configured:
               directory = Path(configured).absolute()
@@ -246,6 +281,8 @@ spec:
               "wrapper_exit_code": None, "evidence_policy": policy, "evidence_status": "failed",
               "verification_status": "skipped", "publication_status": "pending",
               "publication_url": None, "receipt": None, "evidence": None,
+              "log_publication_policy": log_policy, "log_publication_status": "skipped",
+              "log_publication_reason": None, "log_publication_record": None,
               "failure_stage": None, "error_code": None, "error": None, "errors": [],
           }
           parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -303,6 +340,36 @@ spec:
                       identity.extend(["--identity-token-env", os.environ["ATTEST_IDENTITY_TOKEN_ENV"]])
                   command(identity)
                   pack.extend(["--identity-bundle", str(bundle)])
+              # Explicit opt-in only, after signing. A failed build retains its own
+              # code and diagnostic evidence without disclosing a log entry.
+              if log_policy != "off" and code == 0:
+                  stage = "log_publication"
+                  publication = directory / "publication.json"
+                  publish = ["attest", "causal", "publish", "--receipt", str(receipt),
+                             "--log-config", log_config, "--output", str(publication),
+                             "--publication-policy", log_policy, "--timeout-secs", str(log_timeout),
+                             "--trust-store", os.environ.get("ATTEST_TRUST_STORE")
+                             or str(Path(known.workspace) / ".attest/trust"), "--format", "json"]
+                  published = subprocess.run(publish, capture_output=True, text=True, timeout=135)
+                  summary = json.loads(published.stdout)
+                  state = summary.get("status")
+                  if state not in ("confirmed", "unconfirmed", "error"):
+                      raise StageFailure("publisher returned an invalid status")
+                  status["log_publication_status"] = state
+                  reason = summary.get("reason")
+                  # Only fixed protocol reasons are exported; no opening or server body.
+                  if reason not in (None, "prepared", "request-failed", "service-refused",
+                                    "awaiting-inclusion", "invalid-proof", "deadline", "attempt-limit"):
+                      raise StageFailure("publisher returned an invalid reason")
+                  status["log_publication_reason"] = reason
+                  if published.returncode not in (0, 3) or not publication.is_file():
+                      raise StageFailure("publisher could not retain publication evidence")
+                  if state == "confirmed" and published.returncode != 0:
+                      raise StageFailure("publisher reported inconsistent confirmation")
+                  status["log_publication_record"] = str(publication)
+                  pack.extend(["--publication", str(publication)])
+                  if state != "confirmed":
+                      failure(status, stage, "log_publication_unconfirmed", reason or "unconfirmed")
               stage = "packaging"
               command(pack)
               if not archive.is_file():
@@ -314,6 +381,10 @@ spec:
                         "--format", "json"]
               if os.environ.get("ATTEST_IDENTITY_POLICY"):
                   verify.extend(["--identity-policy", os.environ["ATTEST_IDENTITY_POLICY"]])
+              if status["log_publication_record"]:
+                  verify.extend(["--log-trust", log_config])
+                  if log_policy == "required":
+                      verify.extend(["--require", "log-inclusion"])
               checked = subprocess.run(verify, capture_output=True, text=True)
               (directory / "verification.json").write_text(checked.stdout)
               verdict = json.loads(checked.stdout)
@@ -321,9 +392,11 @@ spec:
                   status["verification_status"] = "failed"
                   raise StageFailure(f"evidence verification failed (exit {checked.returncode})")
               status["verification_status"] = "passed"
-          except (OSError, ValueError, KeyError, StageFailure) as error:
+          except (OSError, ValueError, KeyError, StageFailure, subprocess.TimeoutExpired) as error:
               if stage == "verification":
                   status["verification_status"] = "failed"
+              if stage == "log_publication":
+                  status["log_publication_status"] = "error"
               failure(status, stage, stage + "_failed", error)
 
           publisher = os.environ.get("ATTEST_PUBLISHER", "github" if os.environ.get("GITHUB_OUTPUT") else "none")
@@ -356,6 +429,9 @@ spec:
           except (OSError, ValueError):
               code = os.environ.get("ATTEST_EXIT_CODE", "")
               return int(code) if code and int(code) != 0 else (0 if build_outcome != "success" else 2)
+          for key, value in {"log_publication_policy": "off", "log_publication_status": "skipped",
+                             "log_publication_reason": None, "log_publication_record": None}.items():
+              status.setdefault(key, value)
           status["publication_status"] = {"success": "published", "failure": "failed"}.get(publication_outcome, "skipped")
           status["publication_url"] = os.environ.get("ATTEST_PUBLICATION_URL") if publication_outcome == "success" else None
           if status["evidence"] and status["publication_status"] != "published":

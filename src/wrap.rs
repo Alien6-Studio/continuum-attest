@@ -276,6 +276,38 @@ fn run_wrap_inner(
         isolation: Some(wrapped_isolation(input_permissions_held)),
     };
 
+    // Wrap receipts need the same local causal evidence as pipeline receipts.
+    // These ledger operations use filesystem I/O only, including when the
+    // synchronous API is called from the CLI's existing Tokio runtime.
+    let mut ledger =
+        crate::storage::causal_ledger::CausalLedger::new(&options.workspace.join(".attest"))?;
+    ledger.init_local()?;
+    let environment_hash = blake3::hash(
+        format!(
+            "{}:{}:wrapped",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+        .as_bytes(),
+    )
+    .to_hex()
+    .to_string();
+    let step = &receipt.steps[0];
+    let event = ledger.record_event_local(
+        &options.name,
+        vec![],
+        &step.input_hash,
+        &step.output_hash,
+        step.exit_code,
+        &receipt.pipeline_hash,
+        &environment_hash,
+        Default::default(),
+    )?;
+    receipt.causal_events = vec![event.event_id.clone()];
+    receipt.causal_chain_hash = Some(crate::storage::causal_ledger::CausalLedger::chain_hash(&[
+        event,
+    ]));
+
     if options.sign {
         let mut storage = Storage::new(&options.workspace)?;
         let store = crate::keys::KeyStore::new(&options.workspace);

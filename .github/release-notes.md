@@ -1,24 +1,22 @@
-# 0.3.1 — Ember Sky
+# 0.4.0 — Glass Ocean
 
-**Keep your build. Deliver the evidence with it.**
+**Give your delivery an independently recorded point of reference.**
 
-A software delivery should give its recipient something they can check,
-alongside the files they receive. Ember Sky brings that handoff into an
-existing CI job: produce a signed record of the build, keep the evidence with
-the artifact, and let the recipient decide whether the delivery meets their
-requirements.
+A recipient can already check the files and signed evidence you deliver.
+Glass Ocean adds an observation outside the producer's own history: choose a
+log you trust, publish a commitment to the build's causal record, and deliver
+the proof with the software. Your recipient can check that proof offline.
 
-**0.3.1 is the recommended Ember Sky release.** It replaces 0.3.0, whose
-incomplete verification path could leave recipients without the checks they
-needed. If you installed 0.3.0, upgrade to this version.
+**Development draft.** Qualification is in progress. The recommended published
+release remains 0.3.1 until Glass Ocean is released.
 
 ## Install
 
-Available on Linux and macOS, for x86-64 and arm64. Download a binary below,
-or install the published crate:
+Available on Linux and macOS, for x86-64 and arm64. Once this release is
+published, download a binary below or install the crate:
 
 ```console
-cargo install continuum-attest --version 0.3.1 --locked
+cargo install continuum-attest --version 0.4.0 --locked
 ```
 
 The installed command is `attest`. Building from source requires Rust 1.89 or
@@ -26,62 +24,65 @@ later. Apache-2.0.
 
 ## Sixty seconds
 
-Start with one build command you already use. Replace the command and paths
-below with your own:
+Keep your existing build command and create its signed receipt:
 
 ```console
 attest keys generate --name release
 attest run --wrap --name build --input src/ --output dist/ --sign -- make dist
 ```
 
-You get a signed receipt covering the declared files. The
-[producer and recipient guide](https://github.com/Alien6-Studio/continuum-attest/blob/v0.3.1/docs/ci-adoption.md)
-shows how to add this to GitHub Actions or GitLab CI, deliver the evidence,
-and verify it on another machine.
+Then explicitly publish a commitment using the log you have configured:
+
+```console
+attest causal publish --receipt <EXACT_RECEIPT_PATH> --log-config producer-log.json --output publication.json --publication-policy required
+```
+
+Publication is irreversible. Review the
+[publication guide](https://github.com/Alien6-Studio/continuum-attest/blob/v0.4.0/docs/publication.md)
+before enabling it; the guide covers operator choice, disclosure, delivery
+and independent recipient trust. Building alone does not publish an entry.
 
 ## What is new
 
-**Adopt Attest one job at a time.** Keep your existing build command and CI.
-Add evidence to the job you want to cover, then expand when it is useful.
-The CI result distinguishes a failed build from missing required evidence,
-so teams can act on the actual delivery problem.
+**Give recipients evidence beyond the producer's own record.** Deliver the
+log's inclusion proof alongside the artifact and receipt. A recipient can
+check the association against a log key they chose, even after the build
+machine and its keys are gone and without a network connection.
 
-**Give recipients a delivery they can check independently.** Send the artifact
-with its supporting evidence. Once their trust is configured, recipients can
-check the delivered files without access to your CI, including on a machine
-with no network. If you also provide the declared source files, they can
-recompute their fingerprints without rebuilding the software.
+**Make missing publication an explicit delivery decision.** Teams can require
+confirmed inclusion before accepting a successful build, or continue with a
+clearly unconfirmed record and its reason. A service acknowledgement alone
+never becomes proof. Failed builds retain their own result, and recipients
+can always demand stronger evidence than the producer required.
 
-**Make acceptance a recipient decision.** A recipient can require an approved
-workflow, the expected source revision and the evidence needed for that
-delivery. A replaced file, unexpected origin or missing required proof leads
-to a refusal that explains what was not established. Sharing provenance in
-another supported format also retains the original evidence for review.
+**Compare what different observers received.** Keep an independently obtained
+log checkpoint and compare it with the delivery's checkpoint. The result
+distinguishes a missing comparison from an authenticated conflict. A valid
+comparison covers those observations; it is not a guarantee about every log
+view or the correctness of the build.
 
 ## Before upgrading
 
-Upgrade the tools used by recipients before sending new evidence packages:
-older verifiers cannot read the new packages. Existing receipt signatures
-remain valid. The
-[adoption guide](https://github.com/Alien6-Studio/continuum-attest/blob/v0.3.1/docs/ci-adoption.md)
-explains the handoff and trust setup.
+Upgrade recipient tools before sending evidence with publication proofs:
+older verifiers refuse that package format. Existing receipts and packages
+remain verifiable. GitHub and GitLab integrations keep log publication off
+until explicitly configured. The
+[adoption guide](https://github.com/Alien6-Studio/continuum-attest/blob/v0.4.0/docs/ci-adoption.md)
+explains the build and artifact handoff; the publication guide adds the log
+decision and its separate outcomes.
 
 ## Check this release before you run it
 
-Check the downloaded files and their origin. For the Linux x86-64 binary:
+Check downloaded files and their origin. For the Linux x86-64 binary:
 
 ```console
 shasum -a 256 -c SHA256SUMS
-gh attestation verify attest-v0.3.1-linux-x86_64.tar.gz \
-  --repo Alien6-Studio/continuum-attest \
-  --signer-workflow Alien6-Studio/continuum-attest/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.3.1
+gh attestation verify attest-v0.4.0-linux-x86_64.tar.gz --repo Alien6-Studio/continuum-attest --signer-workflow Alien6-Studio/continuum-attest/.github/workflows/release.yml --source-ref refs/tags/v0.4.0
 ```
 
-The release includes signatures and signed, timestamped receipts connecting
-the published files to this build.
-
-[ROADMAP.md](https://github.com/Alien6-Studio/continuum-attest/blob/v0.3.1/ROADMAP.md)
+Release signatures and signed, timestamped receipts accompany the published
+files. The
+[roadmap](https://github.com/Alien6-Studio/continuum-attest/blob/v0.4.0/ROADMAP.md)
 describes the remaining milestones.
 
 Apache-2.0.

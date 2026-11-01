@@ -1,4 +1,4 @@
-# Offline evidence package v2
+# Offline evidence packages
 
 `attest-evidence/v2` is a deterministic tar.zst handoff. It carries evidence;
 it never supplies authority to trust that evidence. The recipient provisions
@@ -53,3 +53,36 @@ V1 archives remain readable and receive the same completeness checks. New
 archives use v2 so a verifier from 0.3.0, which does not assess capsule/causal
 completeness, refuses the new format instead of silently accepting less
 evidence than the recipient intended. The receipt wire schema is unchanged.
+
+## Publication extension in 0.4
+
+An explicit `--publication <record.json>` selects `attest-evidence/v3`.
+Without it, packing continues to produce v2. V3 adds `publication.json` and,
+optionally, `log-consistency.json`; all v2 entries and checks still apply.
+Verifiers before 0.4 reject v3. Upgrade recipients before sending it.
+
+The publication record retains a private opening nonce, the causal root,
+the exact opaque entry, log identifier, attempted submissions and either
+confirmed inclusion material or a fixed reason for non-confirmation. Handle
+the archive as private evidence: possession of the opening reveals the
+association between receipt and public entry. It does not contain a log
+private key. A bundled public key never establishes recipient trust.
+
+`attest evidence verify --log-trust <independent-config.json>` checks the
+opening against the signed receipt, the pinned log signature and the complete
+inclusion path. `--require log-inclusion` refuses missing, skipped or invalid
+inclusion. Optional producer publication cannot override this requirement.
+
+`--log-checkpoint <independent-reference.note>` enables comparison against a
+recipient's observation. An archived comparison is used only when it covers
+that reference and the publication checkpoint. An explicit `--log-consistency`
+file overrides the archived copy. Both signed checkpoints and every proof node
+are checked locally. Missing comparison is `skipped`; authenticated unequal
+roots at the same size are a conflict and `fail`. `--require log-consistency`
+accepts only a passed comparison. Success covers those two checkpoints, not
+every observer's view. No command in evidence verification fetches a proof.
+
+The exact encodings, bounds and trust model are specified in
+[attest-publication-v1](specifications/attest-publication-v1.md). The ordinary
+receipt-verification JSON contract remains unchanged; these two additional
+checks belong to evidence verification.

@@ -317,6 +317,12 @@ its verdict includes artifact, workflow identity, capsule and causal completenes
 checks and is separate from the
 receipt-file JSON schema.
 
+Development for **0.4 — Glass Ocean** adds explicit causal-root commitment
+publication and offline inclusion/checkpoint comparison. The
+[publication guide](docs/publication.md) documents the disclosure decision,
+independent log trust and optional CI integration. This development work does
+not change the recommended published version, 0.3.1.
+
 Interfaces that carry a `schema_version` (receipts, `attest.yaml`) follow a
 documented compatibility policy: older receipts stay verifiable, and a receipt
 from a newer version tells you to upgrade rather than failing obscurely.

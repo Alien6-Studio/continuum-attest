@@ -16,7 +16,14 @@ fn recipient_verifies_reproducible_evidence_without_producer_workspace() {
     release.pack().assert().success();
     assert_eq!(first, std::fs::read(&release.archive).unwrap());
     let entries = read_archive(&release.archive).unwrap();
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 5);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.path.starts_with("events/"))
+            .count(),
+        1
+    );
     assert_eq!(
         entries
             .iter()
@@ -42,6 +49,7 @@ fn recipient_verifies_reproducible_evidence_without_producer_workspace() {
     assert_eq!(result["verdict"], "pass");
     assert_eq!(check(&result, "signature")["status"], "pass");
     assert_eq!(check(&result, "artifacts")["status"], "pass");
+    assert_eq!(check(&result, "chain-linkage")["status"], "pass");
     assert_eq!(check(&result, "identity")["status"], "skipped");
     assert!(!recipient.path().join(".attest/keys").exists());
 }

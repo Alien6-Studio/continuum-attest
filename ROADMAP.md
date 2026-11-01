@@ -97,6 +97,10 @@ Local key-based signing remains available for disconnected producers.
 
 ## 0.4 — Glass Ocean: externally recorded evidence
 
+**Status: in development.** The [publication contract](docs/specifications/attest-publication-v1.md)
+defines disclosure, independent log trust and the acceptance cases before
+implementation. The recommended installed release remains 0.3.1.
+
 **Outcome:** a recipient can check that a receipt's causal root was included
 in an external append-only log.
 
